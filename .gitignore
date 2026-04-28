@@ -13,6 +13,7 @@ logs
 *outputs*
 data/*
 !assets/*.gif
+!assets/*.png
 !data/custom_datasets.py
 examples/*
 !examples/01_mnist.ipynb

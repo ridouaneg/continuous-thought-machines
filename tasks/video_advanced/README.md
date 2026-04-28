@@ -24,6 +24,17 @@ pair; distractors are random shape/colour combinations; the model must
 against the probe. Vary `D` at evaluation time to map the architecture's
 memory horizon.
 
+Example clip pair (top row matches, bottom row does not):
+
+![DMS example](../../assets/dms_example.gif)
+
+A static frame grid is also available at `assets/dms_example_grid.png`.
+Regenerate either with:
+
+```
+python tasks/video_advanced/make_dms_demo.py
+```
+
 Headline plot: **accuracy vs delay length**. This is the canonical
 working-memory curve from cognitive science, applied to the CTM.
 
