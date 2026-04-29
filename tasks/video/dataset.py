@@ -15,7 +15,15 @@ Three backends:
   (``<data_root>/hmdb51_org/<ClassName>/<video>.avi``) plus the split txt
   files under ``<data_root>/testTrainMulti_7030_splits/``.
 
-Both real datasets use ``torchvision.io.read_video`` for decoding. Frames
+- ``Kinetics400Clips``: Kinetics-400 layout as distributed by the official
+  download scripts:
+  ``<data_root>/kinetics_400_<split>/<class>/<youtube_id>_<start:06d>_<end:06d>.mp4``
+  plus a CSV per split (``kinetics_400_{train,val,test}.csv``) with columns
+  ``label,youtube_id,time_start,time_end,split,is_cc`` (the test CSV has no
+  ``label`` column). The class index is derived from the train CSV so it is
+  stable across machines even when only a subset of videos is on disk.
+
+These datasets use ``torchvision.io.read_video`` for decoding. Frames
 are uniformly subsampled to ``n_frames`` (TSN-style segment sampling at
 train time: pick a random frame inside each of ``n_frames`` equal-length
 segments; uniform mid-segment sampling at test time).
@@ -23,6 +31,7 @@ segments; uniform mid-segment sampling at test time).
 
 from __future__ import annotations
 
+import csv
 import glob
 import os
 import random
@@ -243,7 +252,7 @@ def _decode_clip(path: str, n_frames: int, image_size: int, train: bool) -> torc
 
 
 class _ClipDatasetBase(Dataset):
-    """Shared logic for UCF-101 and HMDB-51."""
+    """Shared logic for UCF-101 / HMDB-51 / Kinetics-400."""
 
     records: List[ClipRecord]
     class_labels: List[str]
@@ -257,9 +266,22 @@ class _ClipDatasetBase(Dataset):
         return len(self.records)
 
     def __getitem__(self, index):
-        rec = self.records[index]
-        clip = _decode_clip(rec.path, self.n_frames, self.image_size, self.train)
-        return clip, rec.label
+        # Some Kinetics mp4s on disk are truncated downloads ("moov atom not
+        # found") and a handful of UCF/HMDB clips have decode quirks. Skip
+        # ahead instead of failing the whole DataLoader. Bounded so we don't
+        # loop forever on a fully-corrupt slice.
+        n = len(self.records)
+        for offset in range(min(n, 32)):
+            rec = self.records[(index + offset) % n]
+            try:
+                clip = _decode_clip(rec.path, self.n_frames, self.image_size, self.train)
+            except Exception:
+                continue
+            return clip, rec.label
+        raise RuntimeError(
+            f"Could not decode any of 32 consecutive videos starting at index "
+            f"{index} — check the dataset for corrupt files."
+        )
 
 
 class UCF101Clips(_ClipDatasetBase):
@@ -366,6 +388,88 @@ class HMDB51Clips(_ClipDatasetBase):
                         self.records.append(ClipRecord(path=path, label=class_to_idx[cname]))
 
 
+class Kinetics400Clips(_ClipDatasetBase):
+    """Kinetics-400 clip dataset.
+
+    Expects::
+
+        <root>/kinetics_400_<split>.csv
+        <root>/kinetics_400_<split>/<class>/<youtube_id>_<start:06d>_<end:06d>.mp4
+
+    where ``<split>`` is ``train`` or ``val``. The Kinetics test split is not
+    supported here because the released test CSV has no labels.
+
+    Class index is derived from ``kinetics_400_train.csv`` (alphabetical over
+    the unique labels found there) so the index is stable across machines
+    regardless of which videos are present on the local filesystem. Records
+    whose underlying ``.mp4`` is missing are skipped silently — this lets the
+    same code work on a full Kinetics mirror and on a small "mini-Kinetics"
+    slice (e.g. a handful of classes copied to a workstation for testing).
+    """
+
+    SPLIT_TO_DIR = {"train": "kinetics_400_train", "val": "kinetics_400_val"}
+    SPLIT_TO_CSV = {"train": "kinetics_400_train.csv", "val": "kinetics_400_val.csv"}
+    TRAIN_CSV = "kinetics_400_train.csv"
+
+    def __init__(self, root, split="train", n_frames=16, image_size=112):
+        if split not in self.SPLIT_TO_DIR:
+            raise ValueError(
+                f"Kinetics400Clips supports split='train' or 'val' (got {split!r}); "
+                f"the test split has no labels."
+            )
+        super().__init__(n_frames, image_size, train=(split == "train"))
+        self.root = root
+        self.split = split
+
+        train_csv = os.path.join(root, self.TRAIN_CSV)
+        if not os.path.isfile(train_csv):
+            raise FileNotFoundError(f"Missing train CSV: {train_csv}")
+        labels = set()
+        with open(train_csv, newline="") as f:
+            for row in csv.DictReader(f):
+                lbl = (row.get("label") or "").strip()
+                if lbl:
+                    labels.add(lbl)
+        self.class_labels = sorted(labels)
+        class_to_idx = {c: i for i, c in enumerate(self.class_labels)}
+
+        split_csv = os.path.join(root, self.SPLIT_TO_CSV[split])
+        videos_root = os.path.join(root, self.SPLIT_TO_DIR[split])
+        # On a partial mirror, the val folder may not exist yet — fall back to
+        # train so val-time evaluation still works for sanity testing.
+        if not os.path.isdir(videos_root) and split == "val":
+            fallback = os.path.join(root, self.SPLIT_TO_DIR["train"])
+            if os.path.isdir(fallback):
+                videos_root = fallback
+                split_csv = os.path.join(root, self.SPLIT_TO_CSV["train"])
+        if not os.path.isfile(split_csv):
+            raise FileNotFoundError(f"Missing split CSV: {split_csv}")
+        if not os.path.isdir(videos_root):
+            raise FileNotFoundError(f"Missing video directory: {videos_root}")
+
+        self.records = []
+        n_seen = n_kept = 0
+        with open(split_csv, newline="") as f:
+            for row in csv.DictReader(f):
+                n_seen += 1
+                lbl = (row.get("label") or "").strip()
+                if not lbl or lbl not in class_to_idx:
+                    continue
+                yt = row["youtube_id"].strip()
+                ts = int(float(row["time_start"]))
+                te = int(float(row["time_end"]))
+                fname = f"{yt}_{ts:06d}_{te:06d}.mp4"
+                path = os.path.join(videos_root, lbl, fname)
+                if os.path.isfile(path):
+                    self.records.append(ClipRecord(path=path, label=class_to_idx[lbl]))
+                    n_kept += 1
+        if not self.records:
+            raise RuntimeError(
+                f"No Kinetics videos found on disk for split={split!r}. "
+                f"Looked under {videos_root} using {split_csv}."
+            )
+
+
 # --------------------------------------------------------------------------- #
 # Factory
 # --------------------------------------------------------------------------- #
@@ -397,6 +501,14 @@ def build_datasets(
         )
         test = HMDB51Clips(
             data_root, split="test", fold=fold, n_frames=n_frames, image_size=image_size
+        )
+        return train, test, train.class_labels
+    if dataset == "kinetics":
+        train = Kinetics400Clips(
+            data_root, split="train", n_frames=n_frames, image_size=image_size
+        )
+        test = Kinetics400Clips(
+            data_root, split="val", n_frames=n_frames, image_size=image_size
         )
         return train, test, train.class_labels
     raise ValueError(f"Unknown dataset: {dataset}")

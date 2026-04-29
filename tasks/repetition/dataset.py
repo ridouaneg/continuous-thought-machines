@@ -11,14 +11,15 @@ Four backends:
   Kinetics-400 video IDs + per-clip start/end timestamps and repetition counts.
   Expects videos pre-downloaded as MP4 files.
 
-  Expected layout::
+  Two video layouts are supported:
 
-      <data_root>/
-      ├── countix_train.csv
-      ├── countix_val.csv
-      └── videos/
-          ├── <kinetics_id>.mp4
-          └── ...
+    1. Flat ``<data_root>/videos/<kinetics_id>.mp4`` (the original Countix
+       distribution).
+    2. Official Kinetics-400 layout, where files live under
+       ``<kinetics_root>/kinetics_400_<split>/<class>/<youtube_id>_<start:06d>_<end:06d>.mp4``.
+       Pass ``kinetics_root=<path to Kinetics root>`` to enable this; the
+       loader builds a ``youtube_id -> path`` index by stripping the trailing
+       ``_<start>_<end>`` from each filename.
 
   CSV columns: kinetics_id, repetition_count, start_time, end_time
   (column names are configurable via __init__ kwargs).
@@ -62,7 +63,8 @@ import csv
 import json
 import os
 import random
-from typing import List, Optional, Tuple
+import re
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -261,6 +263,57 @@ class SyntheticOscillatingDots(Dataset):
 
 
 # --------------------------------------------------------------------------- #
+# Kinetics-400 youtube_id index
+# --------------------------------------------------------------------------- #
+
+# Trailing ``_<6-digit>_<6-digit>`` suffix produced by the official Kinetics
+# download scripts (e.g. ``-qAC8YY5F1Q_000040_000050.mp4`` → id ``-qAC8YY5F1Q``).
+_KINETICS_TIMESPAN_RE = re.compile(r"_(\d{6})_(\d{6})$")
+
+
+def _build_kinetics_youtube_id_index(kinetics_root: str) -> Dict[str, str]:
+    """Index a Kinetics-400 mirror by youtube_id.
+
+    Walks ``<kinetics_root>/kinetics_400_*/`` (falling back to a full walk of
+    ``<kinetics_root>/`` if those subfolders are absent) and maps each video's
+    youtube_id to its full path. Per-clip start/end is intentionally ignored —
+    Countix's start/end times are already relative to the trimmed Kinetics
+    clip, and there is exactly one Kinetics clip per youtube_id.
+
+    Args:
+        kinetics_root: Root of the Kinetics mirror.
+
+    Returns:
+        ``{youtube_id: video_path}``. Train wins over val if both have the id.
+    """
+    if not os.path.isdir(kinetics_root):
+        raise FileNotFoundError(f"kinetics_root does not exist: {kinetics_root}")
+
+    # Prefer the standard kinetics_400_train / kinetics_400_val subtrees so we
+    # don't accidentally walk unrelated siblings of the data root.
+    candidate_roots = [
+        os.path.join(kinetics_root, "kinetics_400_train"),
+        os.path.join(kinetics_root, "kinetics_400_val"),
+    ]
+    candidate_roots = [r for r in candidate_roots if os.path.isdir(r)]
+    if not candidate_roots:
+        candidate_roots = [kinetics_root]
+
+    index: Dict[str, str] = {}
+    for root in candidate_roots:
+        for dirpath, _, filenames in os.walk(root):
+            for fname in filenames:
+                stem, ext = os.path.splitext(fname)
+                if ext.lower() != ".mp4":
+                    continue
+                m = _KINETICS_TIMESPAN_RE.search(stem)
+                yt_id = stem[: m.start()] if m else stem
+                # Don't overwrite a hit from train with one from val.
+                index.setdefault(yt_id, os.path.join(dirpath, fname))
+    return index
+
+
+# --------------------------------------------------------------------------- #
 # Countix (RepNet paper)
 # --------------------------------------------------------------------------- #
 
@@ -282,6 +335,10 @@ class CountixDataset(Dataset):
         start_col:      CSV column name for clip start time (seconds), or None.
         end_col:        CSV column name for clip end time (seconds), or None.
         video_ext:      Extension used when looking up downloaded video files.
+        kinetics_root:  Optional root of an official Kinetics-400 mirror
+                        (``<root>/kinetics_400_<split>/<class>/<id>_<start>_<end>.mp4``).
+                        When given, the loader indexes that tree by youtube_id
+                        instead of looking under ``<data_root>/videos/``.
     """
 
     def __init__(
@@ -295,6 +352,7 @@ class CountixDataset(Dataset):
         start_col: str = "start_time",
         end_col: str = "end_time",
         video_ext: str = ".mp4",
+        kinetics_root: Optional[str] = None,
     ):
         self.n_frames = n_frames
         self.image_size = image_size
@@ -304,7 +362,16 @@ class CountixDataset(Dataset):
 
         csv_name = f"countix_{split}.csv"
         csv_path = os.path.join(data_root, csv_name)
-        videos_dir = os.path.join(data_root, "videos")
+
+        if kinetics_root is not None:
+            id_to_path = _build_kinetics_youtube_id_index(kinetics_root)
+            def lookup(vid_id: str) -> Optional[str]:
+                return id_to_path.get(vid_id)
+        else:
+            videos_dir = os.path.join(data_root, "videos")
+            def lookup(vid_id: str) -> Optional[str]:
+                p = os.path.join(videos_dir, vid_id + video_ext)
+                return p if os.path.isfile(p) else None
 
         self.records: List[dict] = []
         with open(csv_path, newline="") as f:
@@ -314,8 +381,8 @@ class CountixDataset(Dataset):
                 count = int(float(row[count_col]))
                 start = float(row[start_col]) if start_col and start_col in row else None
                 end = float(row[end_col]) if end_col and end_col in row else None
-                path = os.path.join(videos_dir, vid_id + video_ext)
-                if os.path.isfile(path):
+                path = lookup(vid_id)
+                if path is not None:
                     self.records.append(
                         {"path": path, "count": count, "start": start, "end": end}
                     )
@@ -473,16 +540,20 @@ def build_datasets(
     image_size: int,
     max_count: int = 16,
     fold: int = 1,
+    kinetics_root: Optional[str] = None,
 ) -> Tuple[Dataset, Dataset]:
     """Build (train_dataset, test_dataset) for the requested backend.
 
     Args:
-        dataset:    One of 'synthetic', 'countix', 'repcount', 'ucfrep'.
-        data_root:  Root directory for real datasets (ignored for 'synthetic').
-        n_frames:   Frames sampled per clip.
-        image_size: Spatial resolution H = W.
-        max_count:  Upper bound on oscillation count for 'synthetic'.
-        fold:       Unused (kept for API consistency with tasks/video).
+        dataset:       One of 'synthetic', 'countix', 'repcount', 'ucfrep'.
+        data_root:     Root directory for real datasets (ignored for 'synthetic').
+        n_frames:      Frames sampled per clip.
+        image_size:    Spatial resolution H = W.
+        max_count:     Upper bound on oscillation count for 'synthetic'.
+        fold:          Unused (kept for API consistency with tasks/video).
+        kinetics_root: For 'countix' only — root of an official Kinetics-400
+                       mirror used to look up videos by youtube_id when the
+                       Countix CSVs are not co-located with the videos.
 
     Returns:
         (train_dataset, test_dataset)
@@ -499,8 +570,14 @@ def build_datasets(
         return train, test
 
     if dataset == "countix":
-        train = CountixDataset(data_root, split="train", n_frames=n_frames, image_size=image_size)
-        test = CountixDataset(data_root, split="val", n_frames=n_frames, image_size=image_size)
+        train = CountixDataset(
+            data_root, split="train", n_frames=n_frames, image_size=image_size,
+            kinetics_root=kinetics_root,
+        )
+        test = CountixDataset(
+            data_root, split="val", n_frames=n_frames, image_size=image_size,
+            kinetics_root=kinetics_root,
+        )
         return train, test
 
     if dataset == "repcount":

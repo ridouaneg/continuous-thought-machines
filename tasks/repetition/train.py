@@ -41,6 +41,10 @@ def parse_args():
     parser.add_argument("--dataset", type=str, default="synthetic",
                         choices=["synthetic", "countix", "repcount", "ucfrep"])
     parser.add_argument("--data_root", type=str, default="data/repetition")
+    parser.add_argument("--kinetics_root", type=str, default=None,
+                        help="For --dataset countix: root of an official Kinetics-400 "
+                             "mirror, used to look up videos by youtube_id when the "
+                             "Countix CSVs are not co-located with the videos.")
     parser.add_argument("--n_frames", type=int, default=64,
                         help="Frames sampled per clip. Nyquist limit = n_frames / 2 reps.")
     parser.add_argument("--image_size", type=int, default=112)
@@ -67,6 +71,14 @@ def parse_args():
     parser.add_argument("--deep_memory", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--do_normalisation", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--backbone_type", type=str, default="resnet18-2")
+    parser.add_argument("--pretrained_backbone",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Use ImageNet-pretrained backbone (default). "
+                             "Pass --no-pretrained_backbone to train from scratch.")
+    parser.add_argument("--freeze_backbone",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Freeze backbone params and lock BN to eval mode "
+                             "(only meaningful with --pretrained_backbone).")
     parser.add_argument("--positional_embedding_type", type=str, default="none",
                         choices=["none", "learnable-fourier", "multi-learnable-fourier",
                                  "custom-rotational"])
@@ -119,7 +131,7 @@ def main():
     # --- Data ---
     train_data, test_data = build_datasets(
         args.dataset, args.data_root, args.n_frames, args.image_size,
-        max_count=args.max_count,
+        max_count=args.max_count, kinetics_root=args.kinetics_root,
     )
     print(f"Dataset={args.dataset}  train={len(train_data)}  test={len(test_data)}  "
           f"buckets={args.n_count_buckets}  max_count={args.max_count}")
@@ -161,6 +173,8 @@ def main():
         dropout=args.dropout,
         dropout_nlm=args.dropout_nlm,
         neuron_select_type=args.neuron_select_type,
+        pretrained_backbone=args.pretrained_backbone,
+        freeze_backbone=args.freeze_backbone,
     ).to(device)
 
     dummy_clip, _ = train_data[0]
@@ -175,8 +189,11 @@ def main():
     raw_model = model.module if isinstance(model, torch.nn.DataParallel) else model
 
     # --- Optimiser ---
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    n_trainable = sum(p.numel() for p in trainable_params)
+    print(f"Trainable params: {n_trainable:,} / {sum(p.numel() for p in model.parameters()):,}")
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
+        trainable_params, lr=args.lr, weight_decay=args.weight_decay,
         eps=1e-8 if not args.use_amp else 1e-6,
     )
     if args.use_scheduler:

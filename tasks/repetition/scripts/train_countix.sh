@@ -6,19 +6,23 @@
 #      and place them as:
 #        ${DATA_ROOT}/countix_train.csv
 #        ${DATA_ROOT}/countix_val.csv
-#   2. Download the Kinetics-400 videos for the IDs in those CSVs (e.g. via
-#      youtube-dl or the official Kinetics download scripts) and place them as:
-#        ${DATA_ROOT}/videos/<kinetics_id>.mp4
+#   2. Provide the Kinetics-400 videos. Two options:
+#        a) flat layout — drop them at ${DATA_ROOT}/videos/<kinetics_id>.mp4
+#        b) reuse a Kinetics mirror — set KINETICS_ROOT to a tree shaped like
+#           ${KINETICS_ROOT}/kinetics_400_<split>/<class>/<id>_<start>_<end>.mp4
+#           and the loader will index it by youtube_id.
 #
 # Countix counts go up to ~30, so n_count_buckets=32 covers the full range.
 # n_frames=64 gives a Nyquist limit of 32 reps — sufficient for this dataset.
 set -e
 
 DATA_ROOT=${DATA_ROOT:-data/repetition/countix}
+KINETICS_ROOT=${KINETICS_ROOT:-/geovic/ghermi/data/kinetics}
 
 python -m tasks.repetition.train \
     --dataset countix \
     --data_root "${DATA_ROOT}" \
+    --kinetics_root "${KINETICS_ROOT}" \
     --n_frames 64 \
     --image_size 112 \
     --n_count_buckets 32 \

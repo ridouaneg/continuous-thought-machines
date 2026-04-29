@@ -40,7 +40,7 @@ def parse_args():
 
     # Dataset
     parser.add_argument("--dataset", type=str, default="synthetic",
-                        choices=["synthetic", "ucf101", "hmdb51"])
+                        choices=["synthetic", "ucf101", "hmdb51", "kinetics"])
     parser.add_argument("--data_root", type=str, default="data/video")
     parser.add_argument("--fold", type=int, default=1)
     parser.add_argument("--n_frames", type=int, default=16,
