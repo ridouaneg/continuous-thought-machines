@@ -12,7 +12,7 @@
 #SBATCH --error=%j.err
 
 # Synthetic bouncing-blobs tracking — identity tracking from motion cues.
-set -e
+#set -e
 
 module load arch/a100
 module load ffmpeg/6.1.1

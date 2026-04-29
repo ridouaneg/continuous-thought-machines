@@ -8,7 +8,7 @@
 #       --ucf101_videos /geovic/geovic/UCF-101/videos
 #
 # UCFRep counts go up to ~53, so n_count_buckets=64 covers the range.
-set -e
+#set -e
 
 DATA_ROOT=${DATA_ROOT:-/geovic/ghermi/data/ucfrep}
 

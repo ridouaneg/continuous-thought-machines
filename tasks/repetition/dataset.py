@@ -21,8 +21,15 @@ Four backends:
        loader builds a ``youtube_id -> path`` index by stripping the trailing
        ``_<start>_<end>`` from each filename.
 
-  CSV columns: kinetics_id, repetition_count, start_time, end_time
-  (column names are configurable via __init__ kwargs).
+  CSV columns (official Countix release):
+    video_id, class, kinetics_start, kinetics_end,
+    repetition_start, repetition_end, count
+  Column names are configurable via __init__ kwargs. Repetition timestamps
+  are absolute (relative to the original YouTube video). When the videos on
+  disk are already trimmed to the Kinetics clip span (the standard Kinetics
+  download layout), the loader subtracts ``kinetics_start`` so the seek
+  range is relative to the trimmed file — set ``time_offset_col=None`` to
+  disable that subtraction.
 
 - ``RepCountADataset``: RepCount-A (from the TransRAC paper). CSV annotation
   with video paths and integer counts.
@@ -326,19 +333,23 @@ class CountixDataset(Dataset):
     count, and start/end timestamps within the full Kinetics clip.
 
     Args:
-        data_root:      Root directory (see module-level docstring for layout).
-        split:          'train' or 'val'.
-        n_frames:       Frames to sample per clip.
-        image_size:     Spatial resolution H = W.
-        id_col:         CSV column name for the Kinetics video ID.
-        count_col:      CSV column name for the integer repetition count.
-        start_col:      CSV column name for clip start time (seconds), or None.
-        end_col:        CSV column name for clip end time (seconds), or None.
-        video_ext:      Extension used when looking up downloaded video files.
-        kinetics_root:  Optional root of an official Kinetics-400 mirror
-                        (``<root>/kinetics_400_<split>/<class>/<id>_<start>_<end>.mp4``).
-                        When given, the loader indexes that tree by youtube_id
-                        instead of looking under ``<data_root>/videos/``.
+        data_root:       Root directory (see module-level docstring for layout).
+        split:           'train', 'val', or 'test'.
+        n_frames:        Frames to sample per clip.
+        image_size:      Spatial resolution H = W.
+        id_col:          CSV column name for the YouTube/Kinetics video ID.
+        count_col:       CSV column name for the integer repetition count.
+        start_col:       CSV column name for repetition start time (seconds), or None.
+        end_col:         CSV column name for repetition end time (seconds), or None.
+        time_offset_col: CSV column name whose value is subtracted from
+                         start/end (seconds). Use 'kinetics_start' when the
+                         videos on disk are already trimmed to the Kinetics
+                         clip span; set to None for raw-YouTube videos.
+        video_ext:       Extension used when looking up downloaded video files.
+        kinetics_root:   Optional root of an official Kinetics-400 mirror
+                         (``<root>/kinetics_400_<split>/<class>/<id>_<start>_<end>.mp4``).
+                         When given, the loader indexes that tree by youtube_id
+                         instead of looking under ``<data_root>/videos/``.
     """
 
     def __init__(
@@ -347,10 +358,11 @@ class CountixDataset(Dataset):
         split: str = "train",
         n_frames: int = 64,
         image_size: int = 112,
-        id_col: str = "kinetics_id",
-        count_col: str = "repetition_count",
-        start_col: str = "start_time",
-        end_col: str = "end_time",
+        id_col: str = "video_id",
+        count_col: str = "count",
+        start_col: str = "repetition_start",
+        end_col: str = "repetition_end",
+        time_offset_col: Optional[str] = "kinetics_start",
         video_ext: str = ".mp4",
         kinetics_root: Optional[str] = None,
     ):
@@ -381,6 +393,12 @@ class CountixDataset(Dataset):
                 count = int(float(row[count_col]))
                 start = float(row[start_col]) if start_col and start_col in row else None
                 end = float(row[end_col]) if end_col and end_col in row else None
+                if time_offset_col and time_offset_col in row:
+                    offset = float(row[time_offset_col])
+                    if start is not None:
+                        start = max(0.0, start - offset)
+                    if end is not None:
+                        end = max(0.0, end - offset)
                 path = lookup(vid_id)
                 if path is not None:
                     self.records.append(
