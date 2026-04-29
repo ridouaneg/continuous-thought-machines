@@ -22,10 +22,12 @@ cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
 wandb offline
 
 DATA_ROOT="/lustre/fsn1/projects/rech/kcn/ucm72yx/data/countix/"
+KINETICS_ROOT="//lustre/fsmisc/dataset/kinetics/"
 
 python -m tasks.repetition.train \
     --dataset countix \
     --data_root "${DATA_ROOT}" \
+    --kinetics_root "${KINETICS_ROOT}" \
     --n_frames 64 \
     --image_size 112 \
     --n_count_buckets 32 \
@@ -43,7 +45,7 @@ python -m tasks.repetition.train \
     --batch_size 16 \
     --batch_size_test 16 \
     --lr 1e-4 \
-    --training_iterations 100001 \
+    --training_iterations 10001 \
     --warmup_steps 2000 \
     --track_every 2000 \
     --save_every 2000 \
