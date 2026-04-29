@@ -204,16 +204,27 @@ def _train_augment_video(frames: torch.Tensor, image_size: int) -> torch.Tensor:
 
 def _decode_clip(path: str, n_frames: int, image_size: int, train: bool) -> torch.Tensor:
     """Read a video file and return a (T, C, H, W) float tensor in [-1, 1]."""
-    from torchvision.io import read_video  # imported lazily so synthetic works w/o ffmpeg
+    import cv2  # imported lazily so synthetic works w/o opencv
 
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open {path}")
+    buf = []
     try:
-        frames, _, _ = read_video(path, pts_unit="sec", output_format="TCHW")
-    except Exception as exc:
-        raise RuntimeError(f"Failed to decode {path}: {exc}") from exc
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            # cv2 returns BGR uint8 (H, W, C); convert to RGB
+            buf.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    finally:
+        cap.release()
 
-    num = frames.shape[0]
-    if num == 0:
+    if not buf:
         raise RuntimeError(f"Empty video: {path}")
+    # (T, H, W, C) uint8 -> (T, C, H, W) uint8 tensor
+    frames = torch.from_numpy(np.stack(buf, axis=0)).permute(0, 3, 1, 2).contiguous()
+    num = frames.shape[0]
 
     idxs = _tsn_segment_indices(num, n_frames, train=train)
     frames = frames[idxs].float() / 255.0  # (T, C, H, W) in [0, 1]

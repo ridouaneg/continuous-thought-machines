@@ -29,7 +29,7 @@ python -m tasks.video.train \
     --lr 1e-4 \
     --weight_decay 0.05 \
     --label_smoothing 0.1 \
-    --training_iterations 60001 \
+    --training_iterations 20001 \
     --warmup_steps 2000 \
     --track_every 2000 \
     --save_every 2000 \
