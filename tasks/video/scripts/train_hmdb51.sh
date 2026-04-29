@@ -3,7 +3,7 @@
 # Expects HMDB-51 videos + split files under ${DATA_ROOT}.
 set -e
 
-DATA_ROOT=${DATA_ROOT:-data/video/hmdb51}
+DATA_ROOT=${DATA_ROOT:-/geovic/ghermi/data/hmdb51}
 
 python -m tasks.video.train \
     --dataset hmdb51 \
@@ -32,6 +32,6 @@ python -m tasks.video.train \
     --n_test_batches 30 \
     --dropout 0.1 \
     --log_dir logs/video/hmdb51 \
-    --device 0 \
+    --device 0 1 \
     --use_amp \
     --seed 42

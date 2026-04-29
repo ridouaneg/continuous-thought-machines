@@ -386,6 +386,35 @@ class ClassicControlBackbone(nn.Module):
         return self.input_projector(x)
 
 
+class AudioBackbone(nn.Module):
+    """
+    Lightweight 2D CNN backbone for Mel spectrogram feature extraction.
+
+    Treats the spectrogram as a (freq × time) image and applies two conv-BN-GELU
+    blocks with max-pooling, halving each spatial dimension twice.
+
+    Input shape:  (B, 1, n_mels,    T_frames)
+    Output shape: (B, 64, n_mels//4, T_frames//4)
+    """
+    OUT_CHANNELS = 64
+
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.LazyConv2d(self.OUT_CHANNELS, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(self.OUT_CHANNELS),
+            nn.GELU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(self.OUT_CHANNELS, self.OUT_CHANNELS, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(self.OUT_CHANNELS),
+            nn.GELU(),
+            nn.MaxPool2d(2, 2),
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+
+
 class ShallowWide(nn.Module):
     """
     Simple, wide, shallow convolutional backbone for image feature extraction.

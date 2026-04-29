@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import math
 
-from models.modules import ParityBackbone, LearnableFourierPositionalEncoding, MultiLearnableFourierPositionalEncoding, CustomRotationalEmbedding, CustomRotationalEmbedding1D, ShallowWide
+from models.modules import AudioBackbone, ParityBackbone, LearnableFourierPositionalEncoding, MultiLearnableFourierPositionalEncoding, CustomRotationalEmbedding, CustomRotationalEmbedding1D, ShallowWide
 from models.resnet import prepare_resnet_backbone
 from models.utils import compute_normalized_entropy
 
@@ -110,8 +110,10 @@ class LSTMBaseline(nn.Module):
             return 2048
         elif self.backbone_type == 'parity_backbone':
             return self.d_input
+        elif self.backbone_type == 'audio_backbone':
+            return AudioBackbone.OUT_CHANNELS
         elif 'resnet' in self.backbone_type:
-            if '18' in self.backbone_type or '34' in self.backbone_type: 
+            if '18' in self.backbone_type or '34' in self.backbone_type:
                 if self.backbone_type.split('-')[1]=='1': return 64
                 elif self.backbone_type.split('-')[1]=='2': return 128
                 elif self.backbone_type.split('-')[1]=='3': return 256
@@ -137,6 +139,8 @@ class LSTMBaseline(nn.Module):
         elif self.backbone_type == 'parity_backbone':
             d_backbone = self.get_d_backbone()
             self.backbone = ParityBackbone(n_embeddings=2, d_embedding=d_backbone)
+        elif self.backbone_type == 'audio_backbone':
+            self.backbone = AudioBackbone()
         elif 'resnet' in self.backbone_type:
             self.backbone = prepare_resnet_backbone(self.backbone_type)
         elif self.backbone_type == 'none':

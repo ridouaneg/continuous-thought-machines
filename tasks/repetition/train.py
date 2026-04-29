@@ -1,37 +1,36 @@
-"""Training script for CTM action recognition on UCF-101 / HMDB-51.
+"""Training script for CTM repetition counting.
 
-Couples internal ticks to video frames. Loss is the existing
-``image_classification_loss`` (min-CE + max-certainty, broadcast across
-ticks) — for clip-level labels that is exactly right: the tick axis is
-the frame axis, and the single clip label is broadcast.
+Counts are treated as classification over n_count_buckets discrete buckets.
+This keeps the existing CTM certainty mechanism (entropy-based) intact and
+produces a full distribution over counts at each tick, enabling both argmax
+(OBO accuracy) and soft expected-count (MAE) evaluation.
 
-Training uses full BPTT through every tick. For 32 frames with
-``iterations_per_frame=1`` that is 32 ticks, comparable in cost to
-mazes (75) or ImageNet (75).
+The frame-tick coupling is inherited from ContinuousThoughtMachineRepCount /
+ContinuousThoughtMachineVideo: at internal tick t the model attends to frame
+t // iterations_per_frame. Using n_frames=64 with iterations_per_frame=1
+gives 64 ticks, yielding a Nyquist limit of 32 distinct repetitions.
 """
 
 from __future__ import annotations
 
 import argparse
-import gc
 import os
-import random
 
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
-import torch.nn as nn
 from tqdm.auto import tqdm
 
 sns.set_style("darkgrid")
 if torch.cuda.is_available():
     torch.set_float32_matmul_precision("high")
 
-from tasks.video.dataset import build_datasets
-from tasks.video.model import ContinuousThoughtMachineVideo
+from tasks.repetition.dataset import build_datasets
+from tasks.repetition.losses import count_loss
+from tasks.repetition.model import ContinuousThoughtMachineRepCount
+from tasks.repetition.utils import count_from_buckets, mae, obo_accuracy
 from utils.housekeeping import set_seed, zip_python_code
-from utils.losses import image_classification_loss
 from utils.schedulers import WarmupCosineAnnealingLR, WarmupMultiStepLR, warmup
 
 
@@ -40,12 +39,16 @@ def parse_args():
 
     # Dataset
     parser.add_argument("--dataset", type=str, default="synthetic",
-                        choices=["synthetic", "ucf101", "hmdb51"])
-    parser.add_argument("--data_root", type=str, default="data/video")
-    parser.add_argument("--fold", type=int, default=1)
-    parser.add_argument("--n_frames", type=int, default=16,
-                        help="Frames sampled per clip (== tick count if iterations_per_frame=1).")
+                        choices=["synthetic", "countix", "repcount", "ucfrep"])
+    parser.add_argument("--data_root", type=str, default="data/repetition")
+    parser.add_argument("--n_frames", type=int, default=64,
+                        help="Frames sampled per clip. Nyquist limit = n_frames / 2 reps.")
     parser.add_argument("--image_size", type=int, default=112)
+    parser.add_argument("--max_count", type=int, default=16,
+                        help="Max oscillation count for the synthetic dataset.")
+    parser.add_argument("--n_count_buckets", type=int, default=32,
+                        help="Number of discrete count classes. Labels >= n_count_buckets "
+                             "are clamped to n_count_buckets-1.")
 
     # Model
     parser.add_argument("--d_model", type=int, default=512)
@@ -57,7 +60,9 @@ def parse_args():
     parser.add_argument("--n_synch_out", type=int, default=64)
     parser.add_argument("--n_synch_action", type=int, default=64)
     parser.add_argument("--neuron_select_type", type=str, default="random-pairing")
-    parser.add_argument("--memory_length", type=int, default=16)
+    parser.add_argument("--memory_length", type=int, default=32,
+                        help="NLM history length. ~n_frames/2 covers one full period "
+                             "at the median count.")
     parser.add_argument("--memory_hidden_dims", type=int, default=16)
     parser.add_argument("--deep_memory", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--do_normalisation", action=argparse.BooleanOptionalAction, default=False)
@@ -83,7 +88,7 @@ def parse_args():
     parser.add_argument("--gradient_clipping", type=float, default=-1)
 
     # Housekeeping
-    parser.add_argument("--log_dir", type=str, default="logs/video/scratch")
+    parser.add_argument("--log_dir", type=str, default="logs/repetition/scratch")
     parser.add_argument("--save_every", type=int, default=2000)
     parser.add_argument("--track_every", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
@@ -107,27 +112,27 @@ def pick_device(args):
 
 def main():
     args = parse_args()
+    args.out_dims = args.n_count_buckets
     set_seed(args.seed, deterministic=False)
     os.makedirs(args.log_dir, exist_ok=True)
 
     # --- Data ---
-    train_data, test_data, class_labels = build_datasets(
-        args.dataset, args.data_root, args.n_frames, args.image_size, fold=args.fold
+    train_data, test_data = build_datasets(
+        args.dataset, args.data_root, args.n_frames, args.image_size,
+        max_count=args.max_count,
     )
-    args.out_dims = len(class_labels)
     print(f"Dataset={args.dataset}  train={len(train_data)}  test={len(test_data)}  "
-          f"classes={args.out_dims}")
+          f"buckets={args.n_count_buckets}  max_count={args.max_count}")
 
     train_loader = torch.utils.data.DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers_train, drop_last=True, pin_memory=False
+        num_workers=args.num_workers_train, drop_last=True, pin_memory=False,
     )
     test_loader = torch.utils.data.DataLoader(
         test_data, batch_size=args.batch_size_test, shuffle=True,
-        num_workers=args.num_workers_test, drop_last=False, pin_memory=False
+        num_workers=args.num_workers_test, drop_last=False, pin_memory=False,
     )
 
-    # Save a snapshot of the repo + args for reproducibility.
     zip_python_code(f"{args.log_dir}/repo_state.zip")
     with open(f"{args.log_dir}/args.txt", "w") as f:
         print(args, file=f)
@@ -136,7 +141,7 @@ def main():
     device = pick_device(args)
     print(f"Using device: {device}")
 
-    model = ContinuousThoughtMachineVideo(
+    model = ContinuousThoughtMachineRepCount(
         n_frames=args.n_frames,
         iterations_per_frame=args.iterations_per_frame,
         d_model=args.d_model,
@@ -158,7 +163,6 @@ def main():
         neuron_select_type=args.neuron_select_type,
     ).to(device)
 
-    # Initialise lazy modules with a dummy forward.
     dummy_clip, _ = train_data[0]
     model(dummy_clip.unsqueeze(0).to(device))
     print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
@@ -188,17 +192,20 @@ def main():
             )
     else:
         scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimizer, lr_lambda=warmup(args.warmup_steps).step
+            optimizer, lr_lambda=warmup(args.warmup_steps).step,
         )
     scaler = torch.amp.GradScaler(
-        "cuda" if "cuda" in device else "cpu", enabled=args.use_amp
+        "cuda" if "cuda" in device else "cpu", enabled=args.use_amp,
     )
 
     # --- Metrics ---
     start_iter = 0
-    iters, train_losses, test_losses = [], [], []
-    train_acc_per_tick, test_acc_per_tick = [], []
-    train_acc_mc, test_acc_mc = [], []
+    iters = []
+    train_losses, test_losses = [], []
+    train_obo_per_tick, test_obo_per_tick = [], []
+    train_mae_per_tick, test_mae_per_tick = [], []
+    train_obo_mc, test_obo_mc = [], []
+    train_mae_mc, test_mae_mc = [], []
 
     # --- Optional reload ---
     ckpt_path = f"{args.log_dir}/checkpoint.pt"
@@ -213,10 +220,14 @@ def main():
         iters = ckpt["iters"]
         train_losses = ckpt["train_losses"]
         test_losses = ckpt["test_losses"]
-        train_acc_per_tick = ckpt["train_acc_per_tick"]
-        test_acc_per_tick = ckpt["test_acc_per_tick"]
-        train_acc_mc = ckpt["train_acc_mc"]
-        test_acc_mc = ckpt["test_acc_mc"]
+        train_obo_per_tick = ckpt["train_obo_per_tick"]
+        test_obo_per_tick = ckpt["test_obo_per_tick"]
+        train_mae_per_tick = ckpt["train_mae_per_tick"]
+        test_mae_per_tick = ckpt["test_mae_per_tick"]
+        train_obo_mc = ckpt["train_obo_mc"]
+        test_obo_mc = ckpt["test_obo_mc"]
+        train_mae_mc = ckpt["train_mae_mc"]
+        test_mae_mc = ckpt["test_mae_mc"]
 
     # --- Training loop ---
     data_iter = iter(train_loader)
@@ -237,12 +248,17 @@ def main():
                 dtype=torch.float16, enabled=args.use_amp,
             ):
                 predictions, certainties, _ = model(clips)
-                loss, where_certain = image_classification_loss(
+                loss, where_certain = count_loss(
                     predictions, certainties, targets, use_most_certain=True
                 )
 
-            batch_idx = torch.arange(predictions.size(0), device=predictions.device)
-            acc = (predictions.argmax(1)[batch_idx, where_certain] == targets).float().mean().item()
+            # Quick train-batch metric for the progress bar.
+            with torch.no_grad():
+                B = predictions.size(0)
+                batch_idx = torch.arange(B, device=device)
+                mc_logits = predictions[batch_idx, :, where_certain]    # (B, buckets)
+                _, argmax_counts = count_from_buckets(mc_logits)
+                batch_obo = obo_accuracy(argmax_counts, targets)
 
             scaler.scale(loss).backward()
             if args.gradient_clipping > 0:
@@ -255,26 +271,29 @@ def main():
 
             lr_now = optimizer.param_groups[-1]["lr"]
             pbar.set_description(
-                f"[{args.dataset}] loss={loss.item():.3f} acc={acc:.3f} "
-                f"lr={lr_now:.2e} tick_certain={where_certain.float().mean().item():.1f}"
+                f"[{args.dataset}] loss={loss.item():.3f} obo={batch_obo:.3f} "
+                f"lr={lr_now:.2e} tick={where_certain.float().mean().item():.1f}"
             )
             pbar.update(1)
 
             # --- Eval & plots ---
             if (bi % args.track_every == 0 and bi > 0) or bi == args.training_iterations - 1:
                 iters.append(bi)
-                tr_loss, tr_per_tick, tr_mc = _evaluate(
-                    model, train_loader, device, args, use_inference_mode=False
+                tr = _evaluate(model, train_loader, device, args, use_inference_mode=False)
+                te = _evaluate(model, test_loader, device, args, use_inference_mode=True)
+                train_losses.append(tr[0]); test_losses.append(te[0])
+                train_obo_per_tick.append(tr[1]); test_obo_per_tick.append(te[1])
+                train_mae_per_tick.append(tr[2]); test_mae_per_tick.append(te[2])
+                train_obo_mc.append(tr[3]); test_obo_mc.append(te[3])
+                train_mae_mc.append(tr[4]); test_mae_mc.append(te[4])
+                _plot_metrics(
+                    args, iters,
+                    train_losses, test_losses,
+                    train_obo_per_tick, test_obo_per_tick,
+                    train_mae_per_tick, test_mae_per_tick,
+                    train_obo_mc, test_obo_mc,
+                    train_mae_mc, test_mae_mc,
                 )
-                te_loss, te_per_tick, te_mc = _evaluate(
-                    model, test_loader, device, args, use_inference_mode=True
-                )
-                train_losses.append(tr_loss); test_losses.append(te_loss)
-                train_acc_per_tick.append(tr_per_tick); test_acc_per_tick.append(te_per_tick)
-                train_acc_mc.append(tr_mc); test_acc_mc.append(te_mc)
-                _plot_metrics(args, iters, train_losses, test_losses,
-                              train_acc_per_tick, test_acc_per_tick,
-                              train_acc_mc, test_acc_mc)
                 model.train()
 
             # --- Checkpoint ---
@@ -286,71 +305,132 @@ def main():
                     "scaler_state_dict": scaler.state_dict(),
                     "iteration": bi,
                     "iters": iters,
+                    "args": args,
                     "train_losses": train_losses,
                     "test_losses": test_losses,
-                    "train_acc_per_tick": train_acc_per_tick,
-                    "test_acc_per_tick": test_acc_per_tick,
-                    "train_acc_mc": train_acc_mc,
-                    "test_acc_mc": test_acc_mc,
-                    "args": args,
-                    "class_labels": class_labels,
+                    "train_obo_per_tick": train_obo_per_tick,
+                    "test_obo_per_tick": test_obo_per_tick,
+                    "train_mae_per_tick": train_mae_per_tick,
+                    "test_mae_per_tick": test_mae_per_tick,
+                    "train_obo_mc": train_obo_mc,
+                    "test_obo_mc": test_obo_mc,
+                    "train_mae_mc": train_mae_mc,
+                    "test_mae_mc": test_mae_mc,
                 }, ckpt_path)
 
 
 def _evaluate(model, loader, device, args, use_inference_mode):
+    """Evaluate on loader. Returns (loss, per_tick_obo, per_tick_mae, mc_obo, mc_mae)."""
     model.eval()
-    all_targets, all_preds, all_preds_mc, all_losses = [], [], [], []
+    T = args.n_frames * args.iterations_per_frame
+
+    all_targets, all_argmax_per_tick, all_expected_per_tick = [], [], []
+    all_argmax_mc, all_expected_mc, all_losses = [], [], []
+
     context = torch.inference_mode() if use_inference_mode else torch.no_grad()
     with context:
         for i, (clips, targets) in enumerate(loader):
-            clips = clips.to(device); targets = targets.to(device)
+            clips = clips.to(device)
+            targets = targets.to(device)
             predictions, certainties, _ = model(clips)
-            loss, where_certain = image_classification_loss(
+
+            loss, where_certain = count_loss(
                 predictions, certainties, targets, use_most_certain=True
             )
             all_losses.append(loss.item())
-            all_targets.append(targets.cpu().numpy())
-            all_preds.append(predictions.argmax(1).cpu().numpy())  # (B, T)
-            batch_idx = torch.arange(predictions.size(0), device=device)
-            all_preds_mc.append(
-                predictions.argmax(1)[batch_idx, where_certain].cpu().numpy()
+
+            B = predictions.size(0)
+            batch_idx = torch.arange(B, device=device)
+
+            # Per-tick predictions: (B, T) argmax and expected counts.
+            preds_T = predictions.permute(0, 2, 1)              # (B, T, n_buckets)
+            expected_T, argmax_T = count_from_buckets(
+                preds_T.reshape(B * T, args.n_count_buckets)
             )
+            expected_T = expected_T.reshape(B, T)
+            argmax_T = argmax_T.reshape(B, T)
+
+            # Most-certain tick selection.
+            mc_logits = predictions[batch_idx, :, where_certain]    # (B, n_buckets)
+            expected_mc_batch, argmax_mc_batch = count_from_buckets(mc_logits)
+
+            all_targets.append(targets.cpu())
+            all_argmax_per_tick.append(argmax_T.cpu())
+            all_expected_per_tick.append(expected_T.cpu())
+            all_argmax_mc.append(argmax_mc_batch.cpu())
+            all_expected_mc.append(expected_mc_batch.cpu())
+
             if args.n_test_batches != -1 and i >= args.n_test_batches - 1:
                 break
-    all_targets = np.concatenate(all_targets)
-    all_preds = np.concatenate(all_preds)  # (N, T)
-    all_preds_mc = np.concatenate(all_preds_mc)
-    per_tick = (all_preds == all_targets[:, None]).mean(axis=0)  # (T,)
-    mc = (all_preds_mc == all_targets).mean()
-    return float(np.mean(all_losses)), per_tick, float(mc)
+
+    all_targets = torch.cat(all_targets)                            # (N,)
+    all_argmax_pt = torch.cat(all_argmax_per_tick)                  # (N, T)
+    all_expected_pt = torch.cat(all_expected_per_tick)              # (N, T)
+    all_argmax_mc = torch.cat(all_argmax_mc)                        # (N,)
+    all_expected_mc = torch.cat(all_expected_mc)                    # (N,)
+
+    # Per-tick OBO and MAE: average over samples at each tick.
+    per_tick_obo = (
+        (all_argmax_pt.float() - all_targets.float().unsqueeze(1)).abs() <= 1
+    ).float().mean(dim=0).numpy()                                   # (T,)
+    per_tick_mae = (
+        (all_expected_pt.float() - all_targets.float().unsqueeze(1)).abs()
+    ).mean(dim=0).numpy()                                           # (T,)
+
+    mc_obo = obo_accuracy(all_argmax_mc, all_targets)
+    mc_mae = mae(all_expected_mc, all_targets)
+
+    return float(np.mean(all_losses)), per_tick_obo, per_tick_mae, mc_obo, mc_mae
 
 
-def _plot_metrics(args, iters, train_losses, test_losses,
-                  train_acc_per_tick, test_acc_per_tick, train_acc_mc, test_acc_mc):
-    # Loss curve
-    fig = plt.figure(figsize=(10, 4))
-    ax = fig.add_subplot(111)
+def _plot_metrics(
+    args, iters,
+    train_losses, test_losses,
+    train_obo_per_tick, test_obo_per_tick,
+    train_mae_per_tick, test_mae_per_tick,
+    train_obo_mc, test_obo_mc,
+    train_mae_mc, test_mae_mc,
+):
+    T = len(train_obo_per_tick[-1]) if train_obo_per_tick else 1
+    cm = plt.cm.viridis
+
+    # --- Loss ---
+    fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(iters, train_losses, "b-", label=f"train ({train_losses[-1]:.3f})")
     ax.plot(iters, test_losses, "r-", label=f"test ({test_losses[-1]:.3f})")
     ax.legend(loc="upper right"); ax.set_ylim(bottom=0)
     ax.set_xlabel("iteration"); ax.set_ylabel("loss")
     fig.tight_layout(); fig.savefig(f"{args.log_dir}/losses.png", dpi=140); plt.close(fig)
 
-    # Per-tick accuracy heatmap
+    # --- OBO accuracy ---
     fig, axes = plt.subplots(2, 1, figsize=(10, 6))
-    cm = sns.color_palette("viridis", as_cmap=True)
-    tr = np.array(train_acc_per_tick)
-    te = np.array(test_acc_per_tick)
-    T = tr.shape[1]
+    tr_obo = np.array(train_obo_per_tick)
+    te_obo = np.array(test_obo_per_tick)
     for t in range(T):
-        axes[0].plot(iters, tr[:, t], color=cm(t / max(1, T - 1)), alpha=0.35)
-        axes[1].plot(iters, te[:, t], color=cm(t / max(1, T - 1)), alpha=0.35)
-    axes[0].plot(iters, train_acc_mc, "k--", label="most-certain", linewidth=1.5)
-    axes[1].plot(iters, test_acc_mc, "k--", label="most-certain", linewidth=1.5)
-    axes[0].set_title("train accuracy (per tick = per frame, black = most certain)")
-    axes[1].set_title("test accuracy (per tick = per frame, black = most certain)")
-    for ax in axes: ax.legend(loc="lower right"); ax.set_xlabel("iteration")
-    fig.tight_layout(); fig.savefig(f"{args.log_dir}/accuracies.png", dpi=140); plt.close(fig)
+        axes[0].plot(iters, tr_obo[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
+        axes[1].plot(iters, te_obo[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
+    axes[0].plot(iters, train_obo_mc, "k--", label="most-certain", lw=1.5)
+    axes[1].plot(iters, test_obo_mc, "k--", label="most-certain", lw=1.5)
+    axes[0].set_title("train OBO accuracy (per tick, black = most certain)")
+    axes[1].set_title("test OBO accuracy (per tick, black = most certain)")
+    for ax in axes:
+        ax.set_ylim(0, 1); ax.legend(loc="lower right"); ax.set_xlabel("iteration")
+    fig.tight_layout(); fig.savefig(f"{args.log_dir}/obo_accuracy.png", dpi=140); plt.close(fig)
+
+    # --- MAE ---
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6))
+    tr_mae = np.array(train_mae_per_tick)
+    te_mae = np.array(test_mae_per_tick)
+    for t in range(T):
+        axes[0].plot(iters, tr_mae[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
+        axes[1].plot(iters, te_mae[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
+    axes[0].plot(iters, train_mae_mc, "k--", label="most-certain", lw=1.5)
+    axes[1].plot(iters, test_mae_mc, "k--", label="most-certain", lw=1.5)
+    axes[0].set_title("train MAE (per tick, black = most certain)")
+    axes[1].set_title("test MAE (per tick, black = most certain)")
+    for ax in axes:
+        ax.set_ylim(bottom=0); ax.legend(loc="upper right"); ax.set_xlabel("iteration")
+    fig.tight_layout(); fig.savefig(f"{args.log_dir}/mae.png", dpi=140); plt.close(fig)
 
 
 if __name__ == "__main__":

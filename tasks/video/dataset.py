@@ -216,6 +216,8 @@ class UCF101Clips(_ClipDatasetBase):
         self.split = split
 
         videos_root = os.path.join(root, "UCF-101")
+        if not os.path.isdir(videos_root):
+            videos_root = os.path.join(root, "videos")
         splits_root = os.path.join(root, "ucfTrainTestlist")
 
         class_ind = os.path.join(splits_root, "classInd.txt")
@@ -267,7 +269,11 @@ class HMDB51Clips(_ClipDatasetBase):
         self.split = split
 
         videos_root = os.path.join(root, "hmdb51_org")
+        if not os.path.isdir(videos_root):
+            videos_root = os.path.join(root, "video_data")
         splits_root = os.path.join(root, "testTrainMulti_7030_splits")
+        if not os.path.isdir(splits_root):
+            splits_root = os.path.join(root, "annotations")
         class_dirs = sorted(
             d for d in os.listdir(videos_root)
             if os.path.isdir(os.path.join(videos_root, d))
