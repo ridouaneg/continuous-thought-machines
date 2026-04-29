@@ -12,7 +12,7 @@
 #SBATCH --error=%j.err
 
 # UCF-101 (split 1) — 32 frames per clip, 112x112 crop.
-set -e
+#set -e
 
 module load arch/a100
 module load ffmpeg/6.1.1

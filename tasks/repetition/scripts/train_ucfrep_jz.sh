@@ -14,7 +14,7 @@
 # UCFRep — UCF-101 videos re-annotated with repetition counts (526 videos).
 # Annotations + symlink to UCF-101 videos must be prepared with
 # tasks.repetition.scripts.prepare_ucfrep before launching.
-set -e
+#set -e
 
 module load arch/a100
 module load ffmpeg/6.1.1

@@ -12,7 +12,7 @@
 #SBATCH --error=%j.err
 
 # Kinetics-400 — 32 frames per clip, 112x112 crop, 400 classes.
-set -e
+#set -e
 
 module load arch/a100
 module load ffmpeg/6.1.1

@@ -12,7 +12,7 @@
 #SBATCH --error=%j.err
 
 # Synthetic "moving shapes" run — sanity check on H100.
-set -e
+#set -e
 
 module load arch/a100
 module load ffmpeg/6.1.1

@@ -12,7 +12,7 @@
 #SBATCH --error=%j.err
 
 # Synthetic oscillating-dots — sanity check the FFT oscillator hypothesis.
-set -e
+#set -e
 
 module load arch/a100
 module load ffmpeg/6.1.1

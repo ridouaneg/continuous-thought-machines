@@ -12,7 +12,7 @@
 #SBATCH --error=%j.err
 
 # HMDB-51 (split 1) — 16 frames per clip, 112x112 crop.
-set -e
+#set -e
 
 module load arch/a100
 module load ffmpeg/6.1.1

@@ -12,7 +12,7 @@
 #SBATCH --error=%j.err
 
 # Countix (RepNet paper) — Kinetics-400 clips with repetition counts.
-set -e
+#set -e
 
 module load arch/a100
 module load ffmpeg/6.1.1
