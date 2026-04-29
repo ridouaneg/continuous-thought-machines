@@ -19,7 +19,7 @@ set -e
 module load arch/h100
 module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
-source /lustre/fsn1/projects/rech/kcn/ucm72yx/virtual_envs/continuous_thought_machines/bin/activate
+source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.venv/bin/activate
 cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
 wandb offline
 

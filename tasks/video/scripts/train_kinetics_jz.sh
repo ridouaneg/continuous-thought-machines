@@ -17,11 +17,11 @@ set -e
 module load arch/h100
 module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
-source /lustre/fsn1/projects/rech/kcn/ucm72yx/virtual_envs/continuous_thought_machines/bin/activate
+source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.venv/bin/activate
 cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
 wandb offline
 
-DATA_ROOT="/lustre/fsn1/projects/rech/kcn/ucm72yx/data/kinetics/"
+DATA_ROOT="/lustre/fsmisc/dataset/kinetics/"
 
 python -m tasks.video.train \
     --dataset kinetics \
@@ -46,7 +46,7 @@ python -m tasks.video.train \
     --lr 1e-4 \
     --weight_decay 0.05 \
     --label_smoothing 0.1 \
-    --training_iterations 100001 \
+    --training_iterations 50001 \
     --warmup_steps 2000 \
     --track_every 2000 \
     --save_every 2000 \
