@@ -90,6 +90,64 @@ def _tsn_segment_indices(num_video_frames: int, n_frames: int, train: bool) -> n
     return np.clip(np.floor(starts + offsets), 0, num_video_frames - 1).astype(np.int64)
 
 
+def _read_video_frames(
+    path: str,
+    start_sec: Optional[float] = None,
+    end_sec: Optional[float] = None,
+) -> torch.Tensor:
+    """Decode a video into a (T, C, H, W) uint8 tensor.
+
+    Prefers ``torchvision.io.read_video`` when available; falls back to
+    OpenCV otherwise. ``read_video`` was removed from torchvision in
+    version 0.24, so the OpenCV path is the working backend on newer envs.
+    """
+    try:
+        from torchvision.io import read_video
+    except ImportError:
+        return _read_video_opencv(path, start_sec, end_sec)
+
+    kwargs = {"pts_unit": "sec", "output_format": "TCHW"}
+    if start_sec is not None:
+        kwargs["start_pts"] = start_sec
+    if end_sec is not None:
+        kwargs["end_pts"] = end_sec
+    frames, _, _ = read_video(path, **kwargs)
+    return frames  # (T, C, H, W) uint8
+
+
+def _read_video_opencv(
+    path: str,
+    start_sec: Optional[float],
+    end_sec: Optional[float],
+) -> torch.Tensor:
+    import cv2
+
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open {path}")
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        start_frame = 0 if start_sec is None else max(0, int(start_sec * fps))
+        end_frame = total if end_sec is None else min(total, int(end_sec * fps))
+        if start_frame > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+        out = []
+        for _ in range(start_frame, end_frame if end_frame > start_frame else total):
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            out.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    finally:
+        cap.release()
+
+    if not out:
+        raise RuntimeError(f"Empty video (or empty time range): {path}")
+    arr = np.stack(out, axis=0)  # (T, H, W, C) uint8
+    return torch.from_numpy(arr).permute(0, 3, 1, 2).contiguous()
+
+
 def _decode_clip(
     path: str,
     n_frames: int,
@@ -108,16 +166,8 @@ def _decode_clip(
         start_sec: Optional clip start time in seconds (for trimmed clips like Countix).
         end_sec:   Optional clip end time in seconds.
     """
-    from torchvision.io import read_video  # lazy import: synthetic works without ffmpeg
-
-    kwargs = {"pts_unit": "sec", "output_format": "TCHW"}
-    if start_sec is not None:
-        kwargs["start_pts"] = start_sec
-    if end_sec is not None:
-        kwargs["end_pts"] = end_sec
-
     try:
-        frames, _, _ = read_video(path, **kwargs)
+        frames = _read_video_frames(path, start_sec, end_sec)
     except Exception as exc:
         raise RuntimeError(f"Failed to decode {path}: {exc}") from exc
 
