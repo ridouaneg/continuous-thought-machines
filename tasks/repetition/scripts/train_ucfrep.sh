@@ -10,7 +10,7 @@
 # UCFRep counts go up to ~53, so n_count_buckets=64 covers the range.
 #set -e
 
-DATA_ROOT=${DATA_ROOT:-/geovic/ghermi/data/ucfrep}
+DATA_ROOT="/geovic/ghermi/data/ucfrep/"
 
 python -m tasks.repetition.train \
     --dataset ucfrep \

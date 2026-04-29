@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Predictive-coding pretraining on Kinetics (or any video folder).
 # Frozen ImageNet ResNet18 backbone; trains the CTM core only.
-set -e
+#set -e
 
-DATA_ROOT=${DATA_ROOT:-/geovic/ghermi/data/kinetics/kinetics_400_train}
+DATA_ROOT="/geovic/ghermi/data/kinetics/kinetics_400_train/"
 
 python -m tasks.pretrain.pretrain \
     --dataset kinetics \
@@ -23,7 +23,7 @@ python -m tasks.pretrain.pretrain \
     --positional_embedding_type none \
     --batch_size 16 \
     --lr 1e-4 \
-    --training_iterations 30001 \
+    --training_iterations 10001 \
     --warmup_steps 1000 \
     --save_every 2000 \
     --track_every 500 \

@@ -13,7 +13,7 @@
 
 # Predictive-coding pretraining on Kinetics-400 (train split).
 # Frozen ImageNet ResNet18 backbone; trains the CTM core only.
-set -e
+#set -e
 
 module load arch/a100
 module load ffmpeg/6.1.1
@@ -22,7 +22,7 @@ source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.
 cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
 wandb offline
 
-DATA_ROOT="/lustre/fsn1/projects/rech/kcn/ucm72yx/data/kinetics/kinetics_400_train"
+DATA_ROOT="/lustre/fsmisc/dataset/kinetics/kinetics_400_train/"
 
 python -m tasks.pretrain.pretrain \
     --dataset kinetics \
@@ -42,7 +42,7 @@ python -m tasks.pretrain.pretrain \
     --positional_embedding_type none \
     --batch_size 16 \
     --lr 1e-4 \
-    --training_iterations 30001 \
+    --training_iterations 10001 \
     --warmup_steps 1000 \
     --save_every 2000 \
     --track_every 500 \

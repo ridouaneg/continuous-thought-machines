@@ -16,8 +16,8 @@
 # n_frames=64 gives a Nyquist limit of 32 reps — sufficient for this dataset.
 #set -e
 
-DATA_ROOT=${DATA_ROOT:-/geovic/ghermi/data/countix}
-KINETICS_ROOT=${KINETICS_ROOT:-/geovic/ghermi/data/kinetics}
+DATA_ROOT="/geovic/ghermi/data/countix/"
+KINETICS_ROOT="/geovic/ghermi/data/kinetics/"
 
 python -m tasks.repetition.train \
     --dataset countix \
