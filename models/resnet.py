@@ -350,7 +350,7 @@ def resnet152(in_channels, feature_scales, stride=2, pretrained=False, progress=
     )
 
 def prepare_resnet_backbone(backbone_type):
-      
+
     resnet_family = resnet18 # Default
     if '34' in backbone_type: resnet_family = resnet34
     if '50' in backbone_type: resnet_family = resnet50
@@ -371,4 +371,72 @@ def prepare_resnet_backbone(backbone_type):
         do_initial_max_pool=True,
     )
 
+    return backbone
+
+
+class _FrozenBackbone(nn.Module):
+    """Wraps a backbone so its parameters stay frozen and BN stays in eval.
+
+    BN needs to remain in eval mode even when the parent model is set to
+    train(), otherwise running statistics drift on the new dataset and the
+    pretrained features degrade.
+    """
+
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = backbone
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+        self.backbone.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.backbone.eval()
+        return self
+
+    def forward(self, x):
+        return self.backbone(x)
+
+
+def prepare_pretrained_resnet_backbone(backbone_type, freeze=True):
+    """Build an ImageNet-pretrained ResNet truncated to the requested stage.
+
+    ``backbone_type`` follows the same convention as
+    :func:`prepare_resnet_backbone` (e.g. ``"resnet18-2"`` keeps layers 1-2
+    of a ResNet-18). The returned backbone is the standard torchvision
+    ResNet (7x7 conv1 + maxpool) with the head/avgpool removed and only
+    the requested stages kept; channel counts at each stage match what
+    :meth:`ContinuousThoughtMachine.get_d_backbone` expects.
+
+    When ``freeze=True`` the parameters are frozen and BN is locked to
+    eval mode permanently (running stats won't drift).
+    """
+    from torchvision import models as tvm
+
+    family = 'resnet18'
+    if '34' in backbone_type: family = 'resnet34'
+    elif '50' in backbone_type: family = 'resnet50'
+    elif '101' in backbone_type: family = 'resnet101'
+    elif '152' in backbone_type: family = 'resnet152'
+
+    weights = {
+        'resnet18': tvm.ResNet18_Weights.IMAGENET1K_V1,
+        'resnet34': tvm.ResNet34_Weights.IMAGENET1K_V1,
+        'resnet50': tvm.ResNet50_Weights.IMAGENET1K_V2,
+        'resnet101': tvm.ResNet101_Weights.IMAGENET1K_V2,
+        'resnet152': tvm.ResNet152_Weights.IMAGENET1K_V2,
+    }[family]
+    full = getattr(tvm, family)(weights=weights)
+
+    block_num_str = backbone_type.split('-')[-1]
+    keep = int(block_num_str) if block_num_str.isdigit() else 4
+
+    layers = [full.conv1, full.bn1, full.relu, full.maxpool, full.layer1]
+    if keep >= 2: layers.append(full.layer2)
+    if keep >= 3: layers.append(full.layer3)
+    if keep >= 4: layers.append(full.layer4)
+
+    backbone = nn.Sequential(*layers)
+    if freeze:
+        backbone = _FrozenBackbone(backbone)
     return backbone

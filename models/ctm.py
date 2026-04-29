@@ -5,7 +5,7 @@ import math
 from huggingface_hub import PyTorchModelHubMixin, hf_hub_download
 
 from models.modules import AudioBackbone, ParityBackbone, SynapseUNET, Squeeze, SuperLinear, LearnableFourierPositionalEncoding, MultiLearnableFourierPositionalEncoding, CustomRotationalEmbedding, CustomRotationalEmbedding1D, ShallowWide
-from models.resnet import prepare_resnet_backbone
+from models.resnet import prepare_pretrained_resnet_backbone, prepare_resnet_backbone
 from models.utils import compute_normalized_entropy
 
 from models.constants import (
@@ -96,8 +96,10 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                  prediction_reshaper=[-1],
                  dropout=0,
                  dropout_nlm=None,
-                 neuron_select_type='random-pairing',  
+                 neuron_select_type='random-pairing',
                  n_random_pairing_self=0,
+                 pretrained_backbone=False,
+                 freeze_backbone=False,
                  ):
         super(ContinuousThoughtMachine, self).__init__()
 
@@ -114,6 +116,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.positional_embedding_type = positional_embedding_type
         self.neuron_select_type = neuron_select_type
         self.memory_length = memory_length
+        self.pretrained_backbone = pretrained_backbone
+        self.freeze_backbone = freeze_backbone
         dropout_nlm = dropout if dropout_nlm is None else dropout_nlm
 
         # --- Assertions ---
@@ -347,7 +351,12 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         elif self.backbone_type == 'audio_backbone':
             self.backbone = AudioBackbone()
         elif 'resnet' in self.backbone_type:
-            self.backbone = prepare_resnet_backbone(self.backbone_type)
+            if self.pretrained_backbone:
+                self.backbone = prepare_pretrained_resnet_backbone(
+                    self.backbone_type, freeze=self.freeze_backbone
+                )
+            else:
+                self.backbone = prepare_resnet_backbone(self.backbone_type)
         elif self.backbone_type == 'none':
             self.backbone = nn.Identity()
         else:

@@ -62,6 +62,14 @@ def parse_args():
     parser.add_argument("--deep_memory", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--do_normalisation", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--backbone_type", type=str, default="resnet18-2")
+    parser.add_argument("--pretrained_backbone",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Use ImageNet-pretrained backbone (default). "
+                             "Pass --no-pretrained_backbone to train from scratch.")
+    parser.add_argument("--freeze_backbone",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Freeze backbone params and lock BN to eval mode "
+                             "(only meaningful with --pretrained_backbone).")
     parser.add_argument("--positional_embedding_type", type=str, default="none",
                         choices=["none", "learnable-fourier", "multi-learnable-fourier",
                                  "custom-rotational"])
@@ -79,7 +87,8 @@ def parse_args():
                         choices=["cosine", "multistep"])
     parser.add_argument("--milestones", type=int, nargs="+", default=[20000, 35000])
     parser.add_argument("--gamma", type=float, default=0.1)
-    parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--weight_decay", type=float, default=0.05)
+    parser.add_argument("--label_smoothing", type=float, default=0.1)
     parser.add_argument("--gradient_clipping", type=float, default=-1)
 
     # Housekeeping
@@ -156,6 +165,8 @@ def main():
         dropout=args.dropout,
         dropout_nlm=args.dropout_nlm,
         neuron_select_type=args.neuron_select_type,
+        pretrained_backbone=args.pretrained_backbone,
+        freeze_backbone=args.freeze_backbone,
     ).to(device)
 
     # Initialise lazy modules with a dummy forward.
@@ -171,8 +182,11 @@ def main():
     raw_model = model.module if isinstance(model, torch.nn.DataParallel) else model
 
     # --- Optimiser ---
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    n_trainable = sum(p.numel() for p in trainable_params)
+    print(f"Trainable params: {n_trainable:,} / {sum(p.numel() for p in model.parameters()):,}")
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
+        trainable_params, lr=args.lr, weight_decay=args.weight_decay,
         eps=1e-8 if not args.use_amp else 1e-6,
     )
     if args.use_scheduler:
@@ -238,7 +252,8 @@ def main():
             ):
                 predictions, certainties, _ = model(clips)
                 loss, where_certain = image_classification_loss(
-                    predictions, certainties, targets, use_most_certain=True
+                    predictions, certainties, targets, use_most_certain=True,
+                    label_smoothing=args.label_smoothing,
                 )
 
             batch_idx = torch.arange(predictions.size(0), device=predictions.device)
@@ -306,7 +321,8 @@ def _evaluate(model, loader, device, args, use_inference_mode):
             clips = clips.to(device); targets = targets.to(device)
             predictions, certainties, _ = model(clips)
             loss, where_certain = image_classification_loss(
-                predictions, certainties, targets, use_most_certain=True
+                predictions, certainties, targets, use_most_certain=True,
+                label_smoothing=args.label_smoothing,
             )
             all_losses.append(loss.item())
             all_targets.append(targets.cpu().numpy())

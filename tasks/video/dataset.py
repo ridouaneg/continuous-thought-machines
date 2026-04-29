@@ -148,6 +148,60 @@ def _tsn_segment_indices(num_video_frames: int, n_frames: int, train: bool) -> n
     return np.clip(np.floor(starts + offsets), 0, num_video_frames - 1).astype(np.int64)
 
 
+_IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+_IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+
+def _train_augment_video(frames: torch.Tensor, image_size: int) -> torch.Tensor:
+    """Apply video-coherent spatial+photometric augmentation.
+
+    Augmentation parameters are drawn ONCE per clip and reused across all
+    frames so temporal coherence is preserved. Includes:
+      - random resized crop (scale 0.5-1.0, ratio 3/4-4/3)
+      - random horizontal flip (p=0.5)
+      - color jitter (brightness/contrast/saturation in [0.8, 1.2])
+      - random erasing (p=0.25, same region across frames)
+
+    Args:
+        frames: (T, C, H, W) tensor in [0, 1].
+        image_size: Output spatial resolution.
+
+    Returns:
+        (T, C, image_size, image_size) tensor in [0, 1].
+    """
+    import torchvision.transforms.v2.functional as TF
+    from torchvision.transforms.v2 import RandomResizedCrop
+
+    # Random resized crop — same crop for every frame in the clip.
+    i, j, h, w = RandomResizedCrop.get_params(
+        frames, scale=(0.5, 1.0), ratio=(3.0 / 4.0, 4.0 / 3.0)
+    )
+    frames = TF.resized_crop(
+        frames, i, j, h, w, [image_size, image_size],
+        interpolation=TF.InterpolationMode.BILINEAR, antialias=True,
+    )
+
+    if random.random() < 0.5:
+        frames = TF.hflip(frames)
+
+    brightness = random.uniform(0.8, 1.2)
+    contrast = random.uniform(0.8, 1.2)
+    saturation = random.uniform(0.8, 1.2)
+    frames = TF.adjust_brightness(frames, brightness)
+    frames = TF.adjust_contrast(frames, contrast)
+    frames = TF.adjust_saturation(frames, saturation)
+    frames = frames.clamp(0.0, 1.0)
+
+    if random.random() < 0.25:
+        eh = max(4, int(random.uniform(0.10, 0.25) * image_size))
+        ew = max(4, int(random.uniform(0.10, 0.25) * image_size))
+        top = random.randint(0, image_size - eh)
+        left = random.randint(0, image_size - ew)
+        frames[:, :, top:top + eh, left:left + ew] = random.random()
+
+    return frames
+
+
 def _decode_clip(path: str, n_frames: int, image_size: int, train: bool) -> torch.Tensor:
     """Read a video file and return a (T, C, H, W) float tensor in [-1, 1]."""
     from torchvision.io import read_video  # imported lazily so synthetic works w/o ffmpeg
@@ -162,19 +216,18 @@ def _decode_clip(path: str, n_frames: int, image_size: int, train: bool) -> torc
         raise RuntimeError(f"Empty video: {path}")
 
     idxs = _tsn_segment_indices(num, n_frames, train=train)
-    frames = frames[idxs].float() / 255.0  # (T, C, H, W)
+    frames = frames[idxs].float() / 255.0  # (T, C, H, W) in [0, 1]
 
-    # Resize to a square image_size.
-    frames = F.interpolate(
-        frames, size=(image_size, image_size), mode="bilinear", align_corners=False
-    )
-    # Standard ImageNet-ish normalisation (the existing backbones expect it).
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-    frames = (frames - mean) / std
+    if train:
+        frames = _train_augment_video(frames, image_size)
+    else:
+        # Test time: deterministic centre crop after resize.
+        frames = F.interpolate(
+            frames, size=(image_size, image_size),
+            mode="bilinear", align_corners=False,
+        )
 
-    if train and random.random() < 0.5:
-        frames = torch.flip(frames, dims=[3])
+    frames = (frames - _IMAGENET_MEAN) / _IMAGENET_STD
     return frames
 
 

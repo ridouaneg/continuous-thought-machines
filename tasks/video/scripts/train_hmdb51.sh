@@ -21,10 +21,14 @@ python -m tasks.video.train \
     --memory_length 12 \
     --memory_hidden_dims 32 \
     --backbone_type resnet18-2 \
+    --pretrained_backbone \
+    --freeze_backbone \
     --positional_embedding_type none \
     --batch_size 16 \
     --batch_size_test 16 \
     --lr 1e-4 \
+    --weight_decay 0.05 \
+    --label_smoothing 0.1 \
     --training_iterations 60001 \
     --warmup_steps 2000 \
     --track_every 2000 \

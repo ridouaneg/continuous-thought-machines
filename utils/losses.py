@@ -55,20 +55,21 @@ def sort_loss(predictions, targets):
     loss = compute_ctc_loss(predictions, targets, blank_label=predictions.shape[1]-1)
     return loss
 
-def image_classification_loss(predictions, certainties, targets, use_most_certain=True):
+def image_classification_loss(predictions, certainties, targets, use_most_certain=True, label_smoothing=0.0):
     """
     Computes the maze loss with auto-extending cirriculum.
 
     Predictions are of shape: (B, class, internal_ticks),
-    Certainties are of shape: (B, 2, internal_ticks), 
+    Certainties are of shape: (B, 2, internal_ticks),
         where the inside dimension (2) is [normalised_entropy, 1-normalised_entropy]
     Targets are of shape: [B]
 
-    use_most_certain will select either the most certain point or the final point. 
+    use_most_certain will select either the most certain point or the final point.
+    label_smoothing is forwarded to nn.CrossEntropyLoss; default 0.0 keeps prior behaviour.
     """
     targets_expanded = torch.repeat_interleave(targets.unsqueeze(-1), predictions.size(-1), -1)
     # Losses are of shape [B, internal_ticks]
-    losses = nn.CrossEntropyLoss(reduction='none')(predictions, targets_expanded)
+    losses = nn.CrossEntropyLoss(reduction='none', label_smoothing=label_smoothing)(predictions, targets_expanded)
         
     loss_index_1 = losses.argmin(dim=1)
     loss_index_2 = certainties[:,1].argmax(-1)

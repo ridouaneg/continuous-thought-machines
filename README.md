@@ -90,6 +90,17 @@ Please see our [Interactive Website](https://pub.sakana.ai/ctm) for a maze-solvi
 ```
 
 ## Setup
+
+### Option 1: uv
+To set up the environment using [uv](https://docs.astral.sh/uv/):
+
+```
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -r requirements.txt
+```
+
+### Option 2: conda
 To set up the environment using conda:
 
 ```
@@ -127,9 +138,16 @@ For debugging in VSCode, this configuration example might be helpful to you:
 
 ## Running analyses
 
-We also provide analysis and plotting code to replicate many of the plots in our paper. See `tasks/.../analysis/*` for more details on that. We also provide some data (e.g., the mazes we generated for training) and checkpoints (see [here](#checkpoints-and-data)). Note that ffmpeg is required for generating mp4 files from the analysis scripts. It can be installed with:
+We also provide analysis and plotting code to replicate many of the plots in our paper. See `tasks/.../analysis/*` for more details on that. We also provide some data (e.g., the mazes we generated for training) and checkpoints (see [here](#checkpoints-and-data)). Note that ffmpeg is required for generating mp4 files from the analysis scripts. Install it with conda:
 ```
 conda install -c conda-forge ffmpeg
+```
+or via your system package manager (when using the uv setup):
+```
+# Debian/Ubuntu
+sudo apt-get install ffmpeg
+# macOS
+brew install ffmpeg
 ```
 
 
