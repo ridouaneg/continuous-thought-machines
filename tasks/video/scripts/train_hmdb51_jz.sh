@@ -36,6 +36,6 @@ python -m tasks.video.train \
     --n_test_batches 30 \
     --dropout 0.1 \
     --log_dir logs/video/hmdb51 \
-    --device 0 1 \
+    --device 0 \
     --use_amp \
     --seed 42
