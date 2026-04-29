@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=ctm_finetune_ucf101
-#SBATCH -A kcn@h100
-#SBATCH -C h100
+#SBATCH -A oyr@a100
+#SBATCH -C a100
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
@@ -15,7 +15,7 @@
 # Encoder stays frozen; CTM core is initialised from the pretrain checkpoint.
 set -e
 
-module load arch/h100
+module load arch/a100
 module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
 source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.venv/bin/activate
