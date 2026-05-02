@@ -28,4 +28,5 @@ python -m tasks.video.train \
     --save_every 500 \
     --n_test_batches 10 \
     --log_dir logs/video/synthetic \
-    --seed 42
+    --seed 42 \
+    "$@"

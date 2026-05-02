@@ -35,4 +35,5 @@ python -m tasks.tracking.train \
     --save_every 2000 \
     --n_test_batches 20 \
     --log_dir logs/tracking/synthetic \
-    --seed 42 --device 0
+    --seed 42 --device 0 \
+    "$@"

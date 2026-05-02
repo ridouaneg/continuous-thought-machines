@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
 #SBATCH --time=20:00:00
-#SBATCH --output=%j.out
-#SBATCH --error=%j.err
+#SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
+#SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
 # DanceTrack — multi-dancer tracking with frequent occlusions and crossings.
 set -e
@@ -19,7 +19,6 @@ module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
 source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.venv/bin/activate
 cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
-wandb offline
 
 DATA_ROOT="/lustre/fsn1/projects/rech/kcn/ucm72yx/data/DanceTrack/"
 
@@ -55,4 +54,5 @@ python -m tasks.tracking.train \
     --use_amp \
     --log_dir logs/tracking/dancetrack \
     --device 0 \
-    --seed 42
+    --seed 42 \
+    "$@"

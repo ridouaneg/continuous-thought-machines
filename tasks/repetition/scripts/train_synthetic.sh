@@ -31,4 +31,5 @@ python -m tasks.repetition.train \
     --save_every 500 \
     --n_test_batches 10 \
     --log_dir logs/repetition/synthetic \
-    --seed 42 --device 0
+    --seed 42 --device 0 \
+    "$@"

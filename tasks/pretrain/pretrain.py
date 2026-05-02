@@ -29,7 +29,8 @@ if torch.cuda.is_available():
 
 from tasks.pretrain.dataset import build_pretrain_dataset
 from tasks.pretrain.model import CTMVideoPredictiveCoding
-from utils.housekeeping import set_seed, zip_python_code
+from utils.housekeeping import set_seed
+from utils.run import init_run, load_checkpoint, save_checkpoint
 from utils.schedulers import WarmupCosineAnnealingLR, warmup
 
 
@@ -72,6 +73,9 @@ def parse_args():
 
     # Housekeeping
     p.add_argument("--log_dir", type=str, default="logs/pretrain/kinetics")
+    p.add_argument("--run_name", type=str, default=None,
+                   help="Subdirectory of --log_dir for this run. "
+                        "Defaults to ${SLURM_JOB_ID} on JZ, else a timestamp.")
     p.add_argument("--save_every", type=int, default=2000)
     p.add_argument("--track_every", type=int, default=500)
     p.add_argument("--seed", type=int, default=42)
@@ -131,7 +135,7 @@ def build_model(args, device):
 def main():
     args = parse_args()
     set_seed(args.seed, deterministic=False)
-    os.makedirs(args.log_dir, exist_ok=True)
+    init_run(args)
 
     train_data = build_pretrain_dataset(
         args.dataset, args.data_root, args.n_frames, args.image_size,
@@ -143,10 +147,6 @@ def main():
         train_data, batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers, drop_last=True, pin_memory=False,
     )
-
-    zip_python_code(f"{args.log_dir}/repo_state.zip")
-    with open(f"{args.log_dir}/args.txt", "w") as f:
-        print(args, file=f)
 
     device = pick_device(args)
     print(f"Using device: {device}")
@@ -178,10 +178,9 @@ def main():
     start_iter = 0
     iters, losses, mean_cosines = [], [], []
 
-    ckpt_path = f"{args.log_dir}/checkpoint.pt"
-    if args.reload and os.path.isfile(ckpt_path):
-        print(f"Reloading {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    ckpt = load_checkpoint(args.log_dir, map_location=device) if args.reload else None
+    if ckpt is not None:
+        print(f"Reloading {args.log_dir}/checkpoint.pt")
         raw_model.load_state_dict(ckpt["model_state_dict"], strict=False)
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
@@ -233,7 +232,7 @@ def main():
                 _plot_curves(args, iters, losses, mean_cosines)
 
             if (bi % args.save_every == 0 and bi > start_iter) or bi == args.training_iterations - 1:
-                torch.save({
+                save_checkpoint(args.log_dir, {
                     "model_state_dict": raw_model.state_dict(),
                     "core_state_dict": raw_model.core_state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
@@ -244,7 +243,7 @@ def main():
                     "losses": losses,
                     "mean_cosines": mean_cosines,
                     "args": args,
-                }, ckpt_path)
+                }, bi)
 
 
 def _plot_curves(args, iters, losses, mean_cosines):

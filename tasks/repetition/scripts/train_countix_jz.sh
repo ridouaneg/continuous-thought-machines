@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
 #SBATCH --time=20:00:00
-#SBATCH --output=%j.out
-#SBATCH --error=%j.err
+#SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
+#SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
 # Countix (RepNet paper) — Kinetics-400 clips with repetition counts.
 #set -e
@@ -19,10 +19,9 @@ module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
 source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.venv/bin/activate
 cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
-wandb offline
 
 DATA_ROOT="/lustre/fsn1/projects/rech/kcn/ucm72yx/data/countix/"
-KINETICS_ROOT="//lustre/fsmisc/dataset/kinetics/"
+KINETICS_ROOT="/lustre/fsmisc/dataset/kinetics/"
 
 python -m tasks.repetition.train \
     --dataset countix \
@@ -54,4 +53,5 @@ python -m tasks.repetition.train \
     --log_dir logs/repetition/countix \
     --device 0 \
     --use_amp \
-    --seed 42
+    --seed 42 \
+    "$@"

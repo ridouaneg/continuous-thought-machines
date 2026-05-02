@@ -50,10 +50,10 @@ if torch.cuda.is_available():
     torch.set_float32_matmul_precision('high')
 from tqdm.auto import tqdm
 
-from models.utils import get_latest_checkpoint
 from tasks.tracking.losses import tracking_loss, position_mae
 from tasks.tracking.utils import prepare_model, build_datasets
-from utils.housekeeping import set_seed, zip_python_code
+from utils.housekeeping import set_seed
+from utils.run import init_run, load_checkpoint, save_checkpoint
 from utils.schedulers import WarmupCosineAnnealingLR, WarmupMultiStepLR, warmup
 
 
@@ -131,6 +131,9 @@ def parse_args():
 
     # ── Housekeeping ──────────────────────────────────────────────────────
     parser.add_argument('--log_dir', type=str, default='logs/tracking')
+    parser.add_argument('--run_name', type=str, default=None,
+                        help="Subdirectory of --log_dir for this run. "
+                             "Defaults to ${SLURM_JOB_ID} on JZ, else a timestamp.")
     parser.add_argument('--save_every', type=int, default=2000)
     parser.add_argument('--track_every', type=int, default=1000)
     parser.add_argument('--n_test_batches', type=int, default=20)
@@ -234,11 +237,7 @@ def plot_metrics(iters, train_losses, test_losses, train_maes, test_maes,
 if __name__ == '__main__':
     args = parse_args()
     set_seed(args.seed)
-
-    os.makedirs(args.log_dir, exist_ok=True)
-    zip_python_code(f'{args.log_dir}/repo_state.zip')
-    with open(f'{args.log_dir}/args.txt', 'w') as f:
-        print(args, file=f)
+    init_run(args)
 
     # ── Device ────────────────────────────────────────────────────────────
     if args.device[0] != -1:
@@ -320,9 +319,9 @@ if __name__ == '__main__':
     logged_iters = []
 
     # ── Reload ────────────────────────────────────────────────────────────
-    if args.reload and (ckpt_path := get_latest_checkpoint(args.log_dir)):
-        print(f'Reloading from: {ckpt_path}')
-        ckpt = torch.load(ckpt_path, weights_only=False)
+    ckpt = load_checkpoint(args.log_dir, map_location=device) if args.reload else None
+    if ckpt is not None:
+        print(f'Reloading {args.log_dir}/checkpoint.pt')
         model.load_state_dict(ckpt['model_state_dict'], strict=True)
         if not args.reload_model_only:
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
@@ -409,7 +408,7 @@ if __name__ == '__main__':
 
             # ── Checkpoint ────────────────────────────────────────────────
             if bi % args.save_every == 0 and bi > 0:
-                torch.save({
+                save_checkpoint(args.log_dir, {
                     'iteration':           bi,
                     'model_state_dict':    model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
@@ -426,4 +425,4 @@ if __name__ == '__main__':
                     'torch_rng_state':     torch.get_rng_state(),
                     'numpy_rng_state':     np.random.get_state(),
                     'random_rng_state':    random.getstate(),
-                }, f'{args.log_dir}/checkpoint_{bi:07d}.pt')
+                }, bi, keep_history=True)

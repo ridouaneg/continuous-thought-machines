@@ -43,4 +43,5 @@ python -m tasks.video.train \
     --log_dir logs/video/kinetics \
     --device 0 \
     --use_amp \
-    --seed 42
+    --seed 42 \
+    "$@"

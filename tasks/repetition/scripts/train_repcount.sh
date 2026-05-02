@@ -13,9 +13,10 @@
 #
 # RepCount-A has counts up to ~50, so n_count_buckets=64 is recommended.
 # Alternatively, use 32 buckets and set clips with count > 31 to bucket 31.
-set -e
+#set -e
 
 DATA_ROOT=${DATA_ROOT:-data/repetition/repcount}
+DATA_ROOT=""
 
 python -m tasks.repetition.train \
     --dataset repcount \
@@ -46,4 +47,5 @@ python -m tasks.repetition.train \
     --log_dir logs/repetition/repcount \
     --device 0 \
     --use_amp \
-    --seed 42
+    --seed 42 \
+    "$@"

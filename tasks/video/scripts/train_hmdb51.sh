@@ -38,4 +38,5 @@ python -m tasks.video.train \
     --log_dir logs/video/hmdb51 \
     --device 0 1 \
     --use_amp \
-    --seed 42
+    --seed 42 \
+    "$@"

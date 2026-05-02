@@ -30,8 +30,9 @@ if torch.cuda.is_available():
 
 from tasks.video.dataset import build_datasets
 from tasks.video.model import ContinuousThoughtMachineVideo
-from utils.housekeeping import set_seed, zip_python_code
+from utils.housekeeping import set_seed
 from utils.losses import image_classification_loss
+from utils.run import init_run, load_checkpoint, save_checkpoint
 from utils.schedulers import WarmupCosineAnnealingLR, WarmupMultiStepLR, warmup
 
 
@@ -93,6 +94,9 @@ def parse_args():
 
     # Housekeeping
     parser.add_argument("--log_dir", type=str, default="logs/video/scratch")
+    parser.add_argument("--run_name", type=str, default=None,
+                        help="Subdirectory of --log_dir for this run. "
+                             "Defaults to ${SLURM_JOB_ID} on JZ, else a timestamp.")
     parser.add_argument("--save_every", type=int, default=2000)
     parser.add_argument("--track_every", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
@@ -117,7 +121,7 @@ def pick_device(args):
 def main():
     args = parse_args()
     set_seed(args.seed, deterministic=False)
-    os.makedirs(args.log_dir, exist_ok=True)
+    init_run(args)
 
     # --- Data ---
     train_data, test_data, class_labels = build_datasets(
@@ -135,11 +139,6 @@ def main():
         test_data, batch_size=args.batch_size_test, shuffle=True,
         num_workers=args.num_workers_test, drop_last=False, pin_memory=False
     )
-
-    # Save a snapshot of the repo + args for reproducibility.
-    zip_python_code(f"{args.log_dir}/repo_state.zip")
-    with open(f"{args.log_dir}/args.txt", "w") as f:
-        print(args, file=f)
 
     # --- Model ---
     device = pick_device(args)
@@ -215,10 +214,9 @@ def main():
     train_acc_mc, test_acc_mc = [], []
 
     # --- Optional reload ---
-    ckpt_path = f"{args.log_dir}/checkpoint.pt"
-    if args.reload and os.path.isfile(ckpt_path):
-        print(f"Reloading {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    ckpt = load_checkpoint(args.log_dir, map_location=device) if args.reload else None
+    if ckpt is not None:
+        print(f"Reloading {args.log_dir}/checkpoint.pt")
         raw_model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
@@ -294,7 +292,7 @@ def main():
 
             # --- Checkpoint ---
             if (bi % args.save_every == 0 and bi > start_iter) or bi == args.training_iterations - 1:
-                torch.save({
+                save_checkpoint(args.log_dir, {
                     "model_state_dict": raw_model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
@@ -309,7 +307,7 @@ def main():
                     "test_acc_mc": test_acc_mc,
                     "args": args,
                     "class_labels": class_labels,
-                }, ckpt_path)
+                }, bi)
 
 
 def _evaluate(model, loader, device, args, use_inference_mode):

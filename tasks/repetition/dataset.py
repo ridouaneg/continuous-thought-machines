@@ -299,8 +299,8 @@ def _build_kinetics_youtube_id_index(kinetics_root: str) -> Dict[str, str]:
     # Prefer the standard kinetics_400_train / kinetics_400_val subtrees so we
     # don't accidentally walk unrelated siblings of the data root.
     candidate_roots = [
-        os.path.join(kinetics_root, "kinetics_400_train"),
-        os.path.join(kinetics_root, "kinetics_400_val"),
+        os.path.join(kinetics_root, "kinetics_700_train"),
+        os.path.join(kinetics_root, "kinetics_700_val"),
     ]
     candidate_roots = [r for r in candidate_roots if os.path.isdir(r)]
     if not candidate_roots:

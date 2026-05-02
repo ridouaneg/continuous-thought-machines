@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
 #SBATCH --time=20:00:00
-#SBATCH --output=%j.out
-#SBATCH --error=%j.err
+#SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
+#SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
 # HMDB-51 (split 1) — 16 frames per clip, 112x112 crop.
 #set -e
@@ -19,7 +19,6 @@ module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
 source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.venv/bin/activate
 cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
-wandb offline
 
 DATA_ROOT="/lustre/fsn1/projects/rech/kcn/ucm72yx/data/hmdb51/"
 
@@ -56,4 +55,5 @@ python -m tasks.video.train \
     --log_dir logs/video/hmdb51 \
     --device 0 \
     --use_amp \
-    --seed 42
+    --seed 42 \
+    "$@"

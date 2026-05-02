@@ -34,4 +34,5 @@ python -m tasks.pretrain.finetune \
     --log_dir logs/pretrain/baseline_hmdb51 \
     --device 0 \
     --use_amp \
-    --seed 42
+    --seed 42 \
+    "$@"

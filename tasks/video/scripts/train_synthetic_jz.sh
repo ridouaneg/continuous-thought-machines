@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
 #SBATCH --time=20:00:00
-#SBATCH --output=%j.out
-#SBATCH --error=%j.err
+#SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
+#SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
 # Synthetic "moving shapes" run — sanity check on H100.
 #set -e
@@ -19,7 +19,6 @@ module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
 source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.venv/bin/activate
 cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
-wandb offline
 
 python -m tasks.video.train \
     --dataset synthetic \
@@ -46,4 +45,5 @@ python -m tasks.video.train \
     --n_test_batches 10 \
     --log_dir logs/video/synthetic \
     --device 0 \
-    --seed 42
+    --seed 42 \
+    "$@"

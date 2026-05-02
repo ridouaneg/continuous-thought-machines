@@ -11,6 +11,7 @@
 #set -e
 
 DATA_ROOT="/geovic/ghermi/data/ucfrep/"
+#UCF_ROOT="/geovic/geovic/UCF-101/videos/"
 
 python -m tasks.repetition.train \
     --dataset ucfrep \

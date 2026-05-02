@@ -32,4 +32,5 @@ python -m tasks.pretrain.pretrain \
     --log_dir logs/pretrain/kinetics \
     --device 0 \
     --use_amp \
-    --seed 42
+    --seed 42 \
+    "$@"

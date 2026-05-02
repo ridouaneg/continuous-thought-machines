@@ -40,4 +40,5 @@ python -m tasks.tracking.train \
     --n_test_batches 20 \
     --use_amp \
     --log_dir logs/tracking/mot17 \
-    --seed 42 --device 0
+    --seed 42 --device 0 \
+    "$@"
