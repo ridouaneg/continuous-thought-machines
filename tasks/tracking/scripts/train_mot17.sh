@@ -4,6 +4,7 @@
 # Expected layout under DATA_ROOT:
 #   train/MOT17-{02,04,05,09,10,11,13}-DPM/{img1,gt,seqinfo.ini}
 # Validation is a temporal split of training sequences (last val_ratio fraction).
+# On-the-fly model: at internal tick t the CTM attends to frame t//ipf.
 set -e
 
 DATA_ROOT=${DATA_ROOT:-/geovic/ghermi/data/MOT17}
@@ -17,9 +18,11 @@ python -m tasks.tracking.train \
     --n_bins 16 \
     --stride 4 \
     --val_ratio 0.2 \
-    --encoder_type resnet18 \
     --in_channels 3 \
-    --d_feat 256 \
+    --backbone_type resnet18-2 \
+    --pretrained_backbone \
+    --freeze_backbone \
+    --positional_embedding_type learnable-fourier \
     --d_model 512 \
     --d_input 256 \
     --heads 8 \
@@ -28,7 +31,7 @@ python -m tasks.tracking.train \
     --synapse_depth 2 \
     --memory_length 16 \
     --memory_hidden_dims 32 \
-    --iterations 30 \
+    --iterations_per_frame 4 \
     --dropout 0.1 \
     --batch_size 32 \
     --batch_size_test 64 \

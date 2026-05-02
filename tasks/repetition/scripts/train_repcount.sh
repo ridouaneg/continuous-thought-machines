@@ -15,8 +15,7 @@
 # Alternatively, use 32 buckets and set clips with count > 31 to bucket 31.
 #set -e
 
-DATA_ROOT=${DATA_ROOT:-data/repetition/repcount}
-DATA_ROOT=""
+DATA_ROOT="/geovic/ghermi/data/repcount/"
 
 python -m tasks.repetition.train \
     --dataset repcount \

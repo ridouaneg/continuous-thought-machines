@@ -1,142 +1,163 @@
-from typing import Optional
+"""CTM for on-the-fly multi-object tracking.
 
+Mirrors ``ContinuousThoughtMachineVideo``: the internal tick axis is coupled
+to the video frame axis, so at internal tick ``t`` the attention query
+reads from the spatial features of frame ``t // iterations_per_frame``. At
+that same tick the model emits its position prediction for the *current*
+frame — there is no look-ahead. All recurrent state (pre-activation trace,
+NLM outputs, leaky sync accumulators) carries forward across frames.
+
+The output dimension is per-frame: ``n_objects * 2 * n_bins``. The loss
+groups ticks by frame and applies the standard min-CE + most-certain CTM
+loss within each frame block.
+"""
+
+import numpy as np
 import torch
-import torch.nn as nn
 
 from models.ctm import ContinuousThoughtMachine
 
 
-class FrameEncoder(nn.Module):
-    """
-    Encodes each video frame independently, then adds learned temporal
-    positional embeddings so the CTM can distinguish frame order.
+class ContinuousThoughtMachineTracking(ContinuousThoughtMachine):
+    """CTM that attends to one frame per tick and predicts that frame's positions.
 
-    Input  : (B*T, C, H, W)
-    Output : (B, d_feat, T)  — transposed so the CTM backbone='none' pipeline
-             sees (B, d_feat, T) → flatten(2).transpose(1,2) → (B, T, d_feat)
-             → kv_proj → kv.
-
-    encoder_type options
-    --------------------
-    'tiny'
-        3-layer Conv + BN + ReLU, AdaptiveAvgPool → 64-d → Linear.
-        Suitable for small synthetic frames (1 channel, 32 px).
-    'medium'
-        5-layer Conv + BN + ReLU, AdaptiveAvgPool → 128-d → Linear.
-        A reasonable choice for mid-size real images (3 channels, ≤128 px).
-    'resnet18'
-        Pretrained ResNet-18 up to layer2 (stride-8, 128 channels), then
-        AdaptiveAvgPool → 128-d → Linear. The pretrained ResNet stack is
-        fully frozen with BatchNorm locked to eval mode; only the
-        Linear(128, d_feat) projection on top is trainable. Requires
-        torchvision.
+    Args:
+        n_frames: Number of frames per clip.
+        iterations_per_frame: CTM internal ticks spent on each frame
+            (total iterations = n_frames * iterations_per_frame).
+        All other args are forwarded to ``ContinuousThoughtMachine``.
     """
 
-    def __init__(
-        self,
-        in_channels: int,
-        img_size: int,
-        d_feat: int,
-        n_frames: int,
-        encoder_type: str = 'resnet18',
-    ):
-        super().__init__()
-        self.n_frames     = n_frames
-        self.d_feat       = d_feat
-        self.encoder_type = encoder_type
-        self._frozen_resnet_stack: Optional[nn.Module] = None
+    def __init__(self, n_frames, iterations_per_frame=1, **kwargs):
+        kwargs["iterations"] = n_frames * iterations_per_frame
+        super().__init__(**kwargs)
+        self.n_frames = n_frames
+        self.iterations_per_frame = iterations_per_frame
 
-        if encoder_type == 'resnet18':
-            import torchvision.models as tvm
-            resnet = tvm.resnet18(weights=tvm.ResNet18_Weights.DEFAULT)
-            resnet_stack = nn.Sequential(
-                resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool,
-                resnet.layer1, resnet.layer2,
-            )
-            for p in resnet_stack.parameters():
-                p.requires_grad_(False)
-            resnet_stack.eval()
-            self._frozen_resnet_stack = resnet_stack
-            self.cnn = nn.Sequential(
-                resnet_stack,
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Linear(128, d_feat),
-                nn.ReLU(),
-            )
+    def compute_features(self, x):
+        """Encode every frame with the backbone in a single batched call.
 
-        elif encoder_type == 'medium':
-            self.cnn = nn.Sequential(
-                nn.Conv2d(in_channels, 32,  3, padding=1), nn.BatchNorm2d(32),  nn.ReLU(),
-                nn.MaxPool2d(2),
-                nn.Conv2d(32, 64,  3, padding=1), nn.BatchNorm2d(64),  nn.ReLU(),
-                nn.MaxPool2d(2),
-                nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
-                nn.MaxPool2d(2),
-                nn.Conv2d(128, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Linear(128, d_feat),
-                nn.ReLU(),
-            )
+        Args:
+            x: Clip tensor of shape (B, T, C, H, W).
 
-        else:  # 'tiny' — default for synthetic
-            self.cnn = nn.Sequential(
-                nn.Conv2d(in_channels, 16, 3, padding=1), nn.BatchNorm2d(16), nn.ReLU(),
-                nn.MaxPool2d(2),
-                nn.Conv2d(16, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
-                nn.MaxPool2d(2),
-                nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Linear(64, d_feat),
-                nn.ReLU(),
-            )
-
-        # Learned temporal positional embedding: one vector per frame slot
-        self.temporal_emb = nn.Embedding(n_frames, d_feat)
-
-    def train(self, mode: bool = True):
-        super().train(mode)
-        if self._frozen_resnet_stack is not None:
-            self._frozen_resnet_stack.eval()
-        return self
-
-    def forward(self, flat_frames: torch.Tensor) -> torch.Tensor:
+        Returns:
+            kv_all: Tensor of shape (B, T, N_tokens, d_input) — per-frame
+                key/value features ready for cross-attention.
         """
-        flat_frames : (B*T, C, H, W)
-        returns     : (B, d_feat, T)
-        """
-        B_T = flat_frames.shape[0]
-        T   = self.n_frames
-        B   = B_T // T
+        B, T, C, H, W = x.shape
+        flat = x.reshape(B * T, C, H, W)
+        flat = self.initial_rgb(flat)
+        feats = self.backbone(flat)
+        pos_emb = self.positional_embedding(feats)
+        combined = feats + pos_emb
+        _, _, Hp, Wp = feats.shape
+        combined = combined.flatten(2).transpose(1, 2)
+        kv = self.kv_proj(combined)
+        kv = kv.reshape(B, T, Hp * Wp, self.d_input)
+        # Stored so visualisation code can reshape attention back to (H', W').
+        self.kv_spatial_shape = (Hp, Wp)
+        return kv
 
-        feats = self.cnn(flat_frames)                               # (B*T, d_feat)
-        feats = feats.view(B, T, self.d_feat)                      # (B, T, d_feat)
-        t_idx = torch.arange(T, device=flat_frames.device)
-        feats = feats + self.temporal_emb(t_idx)                   # broadcast over B
-        return feats.transpose(1, 2)                               # (B, d_feat, T)
+    def forward(self, x, track=False):
+        B = x.size(0)
+        device = x.device
 
+        pre_activations_tracking = []
+        post_activations_tracking = []
+        synch_out_tracking = []
+        synch_action_tracking = []
+        attention_tracking = []
+        frame_index_tracking = []
 
-class TrackingCTM(nn.Module):
-    """
-    End-to-end tracking model: frame encoder + CTM.
+        kv_all = self.compute_features(x)  # (B, T_frames, N_tokens, d_input)
 
-    The CTM receives T frame tokens (one per frame) as a sequence via
-    cross-attention and iteratively refines object tracks across its internal
-    thought ticks.
-    """
+        state_trace = self.start_trace.unsqueeze(0).expand(B, -1, -1)
+        activated_state = self.start_activated_state.unsqueeze(0).expand(B, -1)
 
-    def __init__(self, frame_encoder: FrameEncoder, ctm: ContinuousThoughtMachine):
-        super().__init__()
-        self.frame_encoder = frame_encoder
-        self.ctm           = ctm
+        predictions = torch.empty(
+            B, self.out_dims, self.iterations, device=device, dtype=torch.float32
+        )
+        certainties = torch.empty(
+            B, 2, self.iterations, device=device, dtype=torch.float32
+        )
 
-    def forward(self, frames: torch.Tensor, track: bool = False):
-        """
-        frames : (B, T, C, H, W)
-        """
-        B, T, C, H, W = frames.shape
-        flat_frames    = frames.reshape(B * T, C, H, W)
-        kv             = self.frame_encoder(flat_frames)   # (B, d_feat, T)
-        return self.ctm(kv, track=track)
+        # Learnable per-pair decays -> leaky integrators for sync.
+        self.decay_params_action.data = torch.clamp(self.decay_params_action, 0, 15)
+        self.decay_params_out.data = torch.clamp(self.decay_params_out, 0, 15)
+        r_action = torch.exp(-self.decay_params_action).unsqueeze(0).repeat(B, 1)
+        r_out = torch.exp(-self.decay_params_out).unsqueeze(0).repeat(B, 1)
+
+        decay_alpha_action, decay_beta_action = None, None
+        _, decay_alpha_out, decay_beta_out = self.compute_synchronisation(
+            activated_state, None, None, r_out, synch_type="out"
+        )
+
+        for stepi in range(self.iterations):
+            frame_idx = stepi // self.iterations_per_frame
+            kv = kv_all[:, frame_idx]  # (B, N_tokens, d_input)
+
+            synchronisation_action, decay_alpha_action, decay_beta_action = (
+                self.compute_synchronisation(
+                    activated_state,
+                    decay_alpha_action,
+                    decay_beta_action,
+                    r_action,
+                    synch_type="action",
+                )
+            )
+
+            q = self.q_proj(synchronisation_action).unsqueeze(1)
+            attn_out, attn_weights = self.attention(
+                q, kv, kv, average_attn_weights=False, need_weights=True
+            )
+            attn_out = attn_out.squeeze(1)
+            pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+
+            state = self.synapses(pre_synapse_input)
+            state_trace = torch.cat(
+                (state_trace[:, :, 1:], state.unsqueeze(-1)), dim=-1
+            )
+            activated_state = self.trace_processor(state_trace)
+
+            synchronisation_out, decay_alpha_out, decay_beta_out = (
+                self.compute_synchronisation(
+                    activated_state,
+                    decay_alpha_out,
+                    decay_beta_out,
+                    r_out,
+                    synch_type="out",
+                )
+            )
+
+            current_prediction = self.output_projector(synchronisation_out)
+            current_certainty = self.compute_certainty(current_prediction)
+
+            predictions[..., stepi] = current_prediction
+            certainties[..., stepi] = current_certainty
+
+            if track:
+                pre_activations_tracking.append(
+                    state_trace[:, :, -1].detach().cpu().numpy()
+                )
+                post_activations_tracking.append(
+                    activated_state.detach().cpu().numpy()
+                )
+                attention_tracking.append(attn_weights.detach().cpu().numpy())
+                synch_out_tracking.append(synchronisation_out.detach().cpu().numpy())
+                synch_action_tracking.append(
+                    synchronisation_action.detach().cpu().numpy()
+                )
+                frame_index_tracking.append(frame_idx)
+
+        if track:
+            return (
+                predictions,
+                certainties,
+                (np.array(synch_out_tracking), np.array(synch_action_tracking)),
+                np.array(pre_activations_tracking),
+                np.array(post_activations_tracking),
+                np.array(attention_tracking),
+                np.array(frame_index_tracking),
+                self.kv_spatial_shape,
+            )
+        return predictions, certainties, synchronisation_out

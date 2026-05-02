@@ -53,5 +53,4 @@ python -m tasks.repetition.train \
     --log_dir logs/repetition/countix \
     --device 0 \
     --use_amp \
-    --seed 42 \
-    "$@"
+    --seed 42

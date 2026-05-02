@@ -12,6 +12,7 @@
 #SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
 # DanceTrack — multi-dancer tracking with frequent occlusions and crossings.
+# On-the-fly model: at internal tick t the CTM attends to frame t//ipf.
 set -e
 
 module load arch/a100
@@ -30,9 +31,11 @@ python -m tasks.tracking.train \
     --img_size 128 \
     --n_bins 16 \
     --stride 4 \
-    --encoder_type resnet18 \
     --in_channels 3 \
-    --d_feat 256 \
+    --backbone_type resnet18-2 \
+    --pretrained_backbone \
+    --freeze_backbone \
+    --positional_embedding_type learnable-fourier \
     --d_model 512 \
     --d_input 256 \
     --heads 8 \
@@ -41,7 +44,7 @@ python -m tasks.tracking.train \
     --synapse_depth 2 \
     --memory_length 16 \
     --memory_hidden_dims 32 \
-    --iterations 30 \
+    --iterations_per_frame 4 \
     --dropout 0.1 \
     --batch_size 32 \
     --batch_size_test 64 \

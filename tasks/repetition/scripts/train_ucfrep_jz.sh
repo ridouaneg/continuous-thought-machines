@@ -53,5 +53,4 @@ python -m tasks.repetition.train \
     --log_dir logs/repetition/ucfrep \
     --device 0 \
     --use_amp \
-    --seed 42 \
-    "$@"
+    --seed 42

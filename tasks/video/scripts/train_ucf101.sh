@@ -3,7 +3,7 @@
 # Expects the UCF-101 videos + split files under ${DATA_ROOT}.
 set -e
 
-DATA_ROOT=${DATA_ROOT:-/geovic/geovic/UCF-101}
+DATA_ROOT="/geovic/geovic/UCF-101/"
 
 python -m tasks.video.train \
     --dataset ucf101 \

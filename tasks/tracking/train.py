@@ -1,19 +1,13 @@
-"""Train the CTM on multi-object tracking.
+"""Train the on-the-fly tracking CTM.
+
+Each internal tick attends to one frame and emits the position prediction
+for that same frame — there is no look-ahead. State carries across frames.
 
 Supports three dataset backends:
 
   synthetic  : fast, fully synthetic Gaussian blobs (no download required)
   mot17      : MOT17 pedestrian tracking (~5 GB download, motchallenge.net)
   dancetrack : DanceTrack dancer tracking (github.com/DanceTrack/DanceTrack)
-
-Key design
-----------
-- Positions are discretised into n_bins bins per axis; tracking becomes a
-  classification task compatible with the CTM certainty mechanism.
-- Targets use -1 as a sentinel for absent / occluded objects; the loss
-  automatically masks those positions out.
-- The frame encoder is swappable: 'tiny' (synthetic), 'medium' or 'resnet18'
-  (real data with pretrained features).
 
 Example usage
 -------------
@@ -23,17 +17,11 @@ python -m tasks.tracking.train --dataset synthetic
 # MOT17 (after downloading to /data/MOT17)
 python -m tasks.tracking.train \\
     --dataset mot17 --data_root /data/MOT17 \\
-    --encoder_type resnet18 --in_channels 3 \\
+    --backbone_type resnet18-2 --in_channels 3 \\
     --n_objects 8 --img_size 128 --n_bins 16 \\
-    --d_model 512 --d_input 256 --iterations 30 \\
+    --d_model 512 --d_input 256 \\
+    --n_frames 8 --iterations_per_frame 4 \\
     --device 0 --log_dir logs/tracking/mot17
-
-# DanceTrack
-python -m tasks.tracking.train \\
-    --dataset dancetrack --data_root /data/DanceTrack \\
-    --encoder_type resnet18 --in_channels 3 \\
-    --n_objects 8 --img_size 128 \\
-    --device 0 --log_dir logs/tracking/dancetrack
 """
 
 import argparse
@@ -58,47 +46,37 @@ from utils.schedulers import WarmupCosineAnnealingLR, WarmupMultiStepLR, warmup
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train CTM on multi-object tracking")
+    parser = argparse.ArgumentParser(description="Train CTM on multi-object tracking (on-the-fly)")
 
     # ── Dataset ───────────────────────────────────────────────────────────
     parser.add_argument('--dataset', type=str, default='synthetic',
-                        choices=['synthetic', 'mot17', 'dancetrack'],
-                        help="Dataset backend.")
-    parser.add_argument('--data_root', type=str, default='',
-                        help="Root directory for real datasets (ignored for synthetic).")
-    parser.add_argument('--n_objects', type=int, default=2,
-                        help="Number of objects to track per window.")
-    parser.add_argument('--n_frames', type=int, default=8,
-                        help="Number of frames per sequence window.")
-    parser.add_argument('--img_size', type=int, default=32,
-                        help="Frames are resized to (img_size × img_size).")
-    parser.add_argument('--n_bins', type=int, default=16,
-                        help="Position discretisation bins per axis.")
-    parser.add_argument('--stride', type=int, default=4,
-                        help="Frame stride between consecutive windows (real datasets).")
-    parser.add_argument('--val_ratio', type=float, default=0.2,
-                        help="Fraction of frames reserved for validation (MOT17).")
+                        choices=['synthetic', 'mot17', 'dancetrack'])
+    parser.add_argument('--data_root', type=str, default='')
+    parser.add_argument('--n_objects', type=int, default=2)
+    parser.add_argument('--n_frames', type=int, default=8)
+    parser.add_argument('--img_size', type=int, default=32)
+    parser.add_argument('--n_bins', type=int, default=16)
+    parser.add_argument('--stride', type=int, default=4)
+    parser.add_argument('--val_ratio', type=float, default=0.2)
     # Synthetic-only
     parser.add_argument('--blob_sigma_px', type=float, default=1.5)
     parser.add_argument('--velocity_scale', type=float, default=0.07)
     parser.add_argument('--n_train', type=int, default=50000)
     parser.add_argument('--n_test',  type=int, default=5000)
-
-    # ── Frame encoder ─────────────────────────────────────────────────────
-    parser.add_argument('--encoder_type', type=str, default='resnet18',
-                        choices=['tiny', 'medium', 'resnet18'],
-                        help="Frame encoder architecture. Default 'resnet18' uses "
-                             "ImageNet-pretrained weights, fully frozen.")
     parser.add_argument('--in_channels', type=int, default=3,
-                        help="Input image channels. Default 3 matches the pretrained "
-                             "ResNet; the synthetic dataset replicates its grayscale "
-                             "blob across RGB and ImageNet-normalises when this is 3. "
-                             "Pass 1 with --encoder_type tiny/medium for the legacy "
-                             "grayscale synthetic flow.")
-    parser.add_argument('--d_feat', type=int, default=64,
-                        help="Frame encoder output dimension.")
+                        help="Input image channels. Synthetic emits 1; with 3 it "
+                             "replicates and ImageNet-normalises.")
 
     # ── CTM architecture ──────────────────────────────────────────────────
+    parser.add_argument('--backbone_type', type=str, default='resnet18-2',
+                        help="Standard CTM backbone (see models/constants.py).")
+    parser.add_argument('--pretrained_backbone',
+                        action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--freeze_backbone',
+                        action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--positional_embedding_type', type=str, default='learnable-fourier',
+                        choices=['none', 'learnable-fourier', 'multi-learnable-fourier',
+                                 'custom-rotational'])
     parser.add_argument('--d_model', type=int, default=256)
     parser.add_argument('--d_input', type=int, default=128)
     parser.add_argument('--heads', type=int, default=4)
@@ -113,7 +91,9 @@ def parse_args():
     parser.add_argument('--neuron_select_type', type=str, default='random-pairing',
                         choices=['first-last', 'random', 'random-pairing'])
     parser.add_argument('--n_random_pairing_self', type=int, default=0)
-    parser.add_argument('--iterations', type=int, default=20)
+    parser.add_argument('--iterations_per_frame', type=int, default=4,
+                        help="CTM internal ticks spent on each frame "
+                             "(total iterations = n_frames * iterations_per_frame).")
 
     # ── Training ──────────────────────────────────────────────────────────
     parser.add_argument('--batch_size', type=int, default=64)
@@ -131,9 +111,7 @@ def parse_args():
 
     # ── Housekeeping ──────────────────────────────────────────────────────
     parser.add_argument('--log_dir', type=str, default='logs/tracking')
-    parser.add_argument('--run_name', type=str, default=None,
-                        help="Subdirectory of --log_dir for this run. "
-                             "Defaults to ${SLURM_JOB_ID} on JZ, else a timestamp.")
+    parser.add_argument('--run_name', type=str, default=None)
     parser.add_argument('--save_every', type=int, default=2000)
     parser.add_argument('--track_every', type=int, default=1000)
     parser.add_argument('--n_test_batches', type=int, default=20)
@@ -147,24 +125,41 @@ def parse_args():
     return parser.parse_args()
 
 
-def reshape_preds(predictions, n_objects, n_frames, n_bins):
-    """(B, N*T*2*K, iters) → (B, N*T*2, K, iters)"""
+def reshape_preds(predictions, n_objects, n_bins):
+    """(B, N*2*K, iters) → (B, N*2, K, iters)"""
     B, _, iters = predictions.shape
-    return predictions.reshape(B, n_objects * n_frames * 2, n_bins, iters)
+    return predictions.reshape(B, n_objects * 2, n_bins, iters)
 
 
-def flatten_targets(targets, n_objects, n_frames):
-    """(B, T, N, 2) → (B, N*T*2)  matching the model output ordering."""
-    B = targets.shape[0]
-    # (B, T, N, 2) → (B, N, T, 2) → (B, N*T*2)
-    return targets.permute(0, 2, 1, 3).reshape(B, n_objects * n_frames * 2)
+def per_tick_bin_accuracy(predictions, targets, iterations_per_frame):
+    """Per-tick bin accuracy aligned with the on-the-fly target schedule.
+
+    predictions : (B, N*2, K, iters)
+    targets     : (B, T, N, 2) bin indices (-1 = absent)
+
+    Returns (iters,) accuracy averaged over valid positions and batch.
+    """
+    B, n_per_frame, _, iters = predictions.shape
+    T = targets.shape[1]
+    ipf = iterations_per_frame
+
+    targets_pf = targets.reshape(B, T, n_per_frame)                   # (B, T, N*2)
+    targets_per_tick = targets_pf.repeat_interleave(ipf, dim=1)        # (B, iters, N*2)
+    targets_per_tick = targets_per_tick.transpose(1, 2)                # (B, N*2, iters)
+    valid = (targets_per_tick >= 0)
+    safe = targets_per_tick.clamp(min=0)
+
+    correct = (predictions.argmax(2) == safe) & valid                 # (B, N*2, iters)
+    n_valid = valid.float().sum(dim=1).clamp(min=1)                   # (B, iters)
+    per_sample = correct.float().sum(dim=1) / n_valid                 # (B, iters)
+    return per_sample.mean(dim=0).cpu().numpy()                       # (iters,)
 
 
 def eval_loop(model, loader, args, device, n_test_batches):
     """Run evaluation; returns (mean_loss, mean_mae, per_tick_acc)."""
     all_losses, all_maes = [], []
-    per_tick_correct = None
-    total = 0
+    per_tick_sum = None
+    n_batches = 0
 
     with torch.inference_mode():
         for bi, (frames, targets) in enumerate(loader):
@@ -172,37 +167,27 @@ def eval_loop(model, loader, args, device, n_test_batches):
             targets = targets.to(device)
 
             preds, certs, _ = model(frames)
-            preds = reshape_preds(preds, args.n_objects, args.n_frames, args.n_bins)
+            preds = reshape_preds(preds, args.n_objects, args.n_bins)
 
-            B          = frames.shape[0]
-            tgts_flat  = flatten_targets(targets, args.n_objects, args.n_frames)
-
-            loss, where_cert = tracking_loss(preds, certs, tgts_flat, args.use_most_certain)
+            loss, where_cert = tracking_loss(
+                preds, certs, targets,
+                iterations_per_frame=args.iterations_per_frame,
+                use_most_certain=args.use_most_certain,
+            )
             all_losses.append(loss.item())
 
-            batch_idx     = torch.arange(B, device=device)
-            preds_at_tick = preds[batch_idx, :, :, where_cert]
-            mae = position_mae(preds_at_tick, tgts_flat, args.n_bins)
+            mae = position_mae(preds, targets, args.n_bins, where_cert)
             all_maes.append(mae)
 
-            # Per-tick bin accuracy (only over valid positions)
-            valid     = (tgts_flat >= 0)                           # (B, N*T*2)
-            correct   = (preds.argmax(2) == tgts_flat.clamp(0).unsqueeze(-1))
-            correct   = (correct * valid.unsqueeze(-1)).float().sum(1)
-            n_valid   = valid.float().sum(1, keepdim=True).clamp(1)
-            tick_acc  = (correct / n_valid).sum(0).cpu()           # (iters,)
-
-            if per_tick_correct is None:
-                per_tick_correct = tick_acc
-            else:
-                per_tick_correct += tick_acc
-            total += B
+            tick_acc = per_tick_bin_accuracy(preds, targets, args.iterations_per_frame)
+            per_tick_sum = tick_acc if per_tick_sum is None else per_tick_sum + tick_acc
+            n_batches += 1
 
             if bi + 1 >= n_test_batches:
                 break
 
-    per_tick_acc = (per_tick_correct / total).numpy()
-    return np.mean(all_losses), np.mean(all_maes), per_tick_acc
+    per_tick_acc = per_tick_sum / max(n_batches, 1)
+    return float(np.mean(all_losses)), float(np.mean(all_maes)), per_tick_acc
 
 
 def plot_metrics(iters, train_losses, test_losses, train_maes, test_maes,
@@ -354,16 +339,18 @@ if __name__ == '__main__':
 
             frames  = frames.to(device)
             targets = targets.to(device)
-            B       = frames.shape[0]
-            tgts_flat = flatten_targets(targets, args.n_objects, args.n_frames)
 
             with torch.autocast(
                 device_type="cuda" if "cuda" in device else "cpu",
                 dtype=torch.float16, enabled=args.use_amp,
             ):
                 preds, certs, _ = model(frames)
-                preds = reshape_preds(preds, args.n_objects, args.n_frames, args.n_bins)
-                loss, where_cert = tracking_loss(preds, certs, tgts_flat, args.use_most_certain)
+                preds = reshape_preds(preds, args.n_objects, args.n_bins)
+                loss, where_cert = tracking_loss(
+                    preds, certs, targets,
+                    iterations_per_frame=args.iterations_per_frame,
+                    use_most_certain=args.use_most_certain,
+                )
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -371,13 +358,13 @@ if __name__ == '__main__':
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
 
-            batch_idx     = torch.arange(B, device=device)
-            preds_at_tick = preds[batch_idx, :, :, where_cert]
-            mae_approx    = position_mae(preds_at_tick, tgts_flat, args.n_bins)
+            mae_approx = position_mae(preds, targets, args.n_bins, where_cert)
 
+            mean_tick = where_cert.float().mean()
+            std_tick  = where_cert.float().std()
             pbar.set_description(
                 f'Loss={loss.item():.3f}  MAE={mae_approx:.3f}'
-                f'  tick={where_cert.float().mean():.1f}±{where_cert.float().std():.1f}'
+                f'  tick={mean_tick:.1f}±{std_tick:.1f}'
                 f'  lr={optimizer.param_groups[0]["lr"]:.2e}'
             )
             pbar.update(1)

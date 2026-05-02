@@ -1,33 +1,25 @@
 import torch
 
-from models.ctm import ContinuousThoughtMachine
-from tasks.tracking.model import FrameEncoder, TrackingCTM
+from tasks.tracking.model import ContinuousThoughtMachineTracking
 
 
 def prepare_model(args, device):
-    """Build and return the full TrackingCTM model (frame encoder + CTM).
+    """Build and return the on-the-fly tracking CTM.
 
-    The CTM receives a T-length sequence of frame tokens and outputs
-    discretised (x, y) position bins for each (object, frame) pair.
+    The CTM attends to one frame per internal tick:
+        frame_idx = stepi // iterations_per_frame
+        total iterations = n_frames * iterations_per_frame
+    At each tick the model emits a prediction over (N objects × 2 axes ×
+    n_bins) for the *current* frame.
 
-    out_dims            = n_objects * n_frames * 2 * n_bins
-    prediction_reshaper = [n_objects * n_frames * 2, n_bins]
+    out_dims            = n_objects * 2 * n_bins
+    prediction_reshaper = [n_objects * 2, n_bins]
     """
-    n_coords = args.n_objects * args.n_frames * 2
+    n_per_frame = args.n_objects * 2
 
-    in_channels  = getattr(args, 'in_channels',  3)
-    encoder_type = getattr(args, 'encoder_type', 'resnet18')
-
-    frame_encoder = FrameEncoder(
-        in_channels=in_channels,
-        img_size=args.img_size,
-        d_feat=args.d_feat,
+    model = ContinuousThoughtMachineTracking(
         n_frames=args.n_frames,
-        encoder_type=encoder_type,
-    )
-
-    ctm = ContinuousThoughtMachine(
-        iterations=args.iterations,
+        iterations_per_frame=args.iterations_per_frame,
         d_model=args.d_model,
         d_input=args.d_input,
         heads=args.heads,
@@ -38,33 +30,36 @@ def prepare_model(args, device):
         deep_nlms=args.deep_memory,
         memory_hidden_dims=args.memory_hidden_dims,
         do_layernorm_nlm=args.do_normalisation,
-        backbone_type='none',
-        positional_embedding_type='none',
-        out_dims=n_coords * args.n_bins,
-        prediction_reshaper=[n_coords, args.n_bins],
+        backbone_type=args.backbone_type,
+        positional_embedding_type=args.positional_embedding_type,
+        out_dims=n_per_frame * args.n_bins,
+        prediction_reshaper=[n_per_frame, args.n_bins],
         dropout=args.dropout,
         neuron_select_type=args.neuron_select_type,
         n_random_pairing_self=args.n_random_pairing_self,
-    )
+        pretrained_backbone=args.pretrained_backbone,
+        freeze_backbone=args.freeze_backbone,
+    ).to(device)
 
-    model = TrackingCTM(frame_encoder, ctm).to(device)
     return model
 
 
-def decode_predictions(predictions, n_objects, n_frames, n_bins, where_certain):
-    """Decode predictions at the most-certain tick.
+def decode_predictions(predictions, where_certain_per_frame, n_objects, n_bins):
+    """Decode per-frame predictions at each frame's most-certain tick.
 
-    predictions   : (B, N*T*2, n_bins, iterations)
-    where_certain : (B,) tick indices
+    predictions             : (B, N*2, n_bins, iterations)
+    where_certain_per_frame : (B, T) absolute tick index per frame
 
     Returns (B, T, N, 2) predicted bin indices.
     """
-    B = predictions.shape[0]
-    batch_idx     = torch.arange(B, device=predictions.device)
-    preds_at_tick = predictions[batch_idx, :, :, where_certain]    # (B, N*T*2, n_bins)
-    pred_bins     = preds_at_tick.argmax(-1)                       # (B, N*T*2)
-    return pred_bins.reshape(B, n_objects, n_frames, 2).permute(0, 2, 1, 3)  # (B, T, N, 2)
+    B, n_per_frame, _, _ = predictions.shape
+    T = where_certain_per_frame.shape[1]
+    b_idx = torch.arange(B, device=predictions.device).unsqueeze(1).expand(-1, T)
+    # → (B, T, N*2, K)
+    preds = predictions.permute(0, 3, 1, 2)[b_idx, where_certain_per_frame]
+    pred_bins = preds.argmax(dim=-1)                                  # (B, T, N*2)
+    return pred_bins.reshape(B, T, n_objects, 2)
 
 
 # Re-export so callers can do: from tasks.tracking.utils import build_datasets
-from tasks.tracking.dataset import build_datasets                   # noqa: E402, F401
+from tasks.tracking.dataset import build_datasets                     # noqa: E402, F401

@@ -12,6 +12,8 @@
 #SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
 # Synthetic bouncing-blobs tracking — identity tracking from motion cues.
+# On-the-fly model: at internal tick t the CTM attends to frame t//ipf and
+# predicts that frame's positions. Total iterations = n_frames * ipf.
 #set -e
 
 module load arch/a100
@@ -30,9 +32,11 @@ python -m tasks.tracking.train \
     --velocity_scale 0.07 \
     --n_train 50000 \
     --n_test 5000 \
-    --encoder_type tiny \
     --in_channels 1 \
-    --d_feat 64 \
+    --backbone_type resnet18-2 \
+    --no-pretrained_backbone \
+    --no-freeze_backbone \
+    --positional_embedding_type learnable-fourier \
     --d_model 256 \
     --d_input 128 \
     --heads 4 \
@@ -41,7 +45,7 @@ python -m tasks.tracking.train \
     --synapse_depth 1 \
     --memory_length 10 \
     --memory_hidden_dims 16 \
-    --iterations 20 \
+    --iterations_per_frame 4 \
     --batch_size 64 \
     --batch_size_test 256 \
     --lr 1e-4 \
