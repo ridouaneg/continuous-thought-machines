@@ -85,8 +85,9 @@ def build_src_index(src: str) -> Dict[str, str]:
     # Try the standard layouts first; the "fsmisc" mirror on JZ stores
     # Kinetics-700, but we also accept 400 and a flat root.
     candidate_subdirs = [
-        "kinetics_700_train", "kinetics_700_val",
-        "kinetics_400_train", "kinetics_400_val",
+        "kinetics_400_train", "kinetics_400_val", "kinetics_400_test",
+        "kinetics_600_train", "kinetics_600_val", "kinetics_600_test",
+        "kinetics_700_train", "kinetics_700_val", "kinetics_700_test",
     ]
     candidate_roots = [os.path.join(src, sd) for sd in candidate_subdirs
                        if os.path.isdir(os.path.join(src, sd))]

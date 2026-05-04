@@ -22,5 +22,6 @@ python -m tasks.repetition.scripts.copy_countix_kinetics \
     --countix-root /lustre/fsn1/projects/rech/kcn/ucm72yx/data/countix \
     --src          /lustre/fsmisc/dataset/kinetics \
     --dst          /lustre/fsn1/projects/rech/kcn/ucm72yx/data/kinetics \
-    --splits train val test \
-    --workers 8
+    --splits train \
+    --workers 8 \
+    --dry-run
