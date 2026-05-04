@@ -53,5 +53,6 @@ python -m tasks.repetition.train \
     --n_test_batches 10 \
     --log_dir logs/repetition/synthetic_survival \
     --device 0 \
+    --use_amp \
     --seed 42 \
     "$@"

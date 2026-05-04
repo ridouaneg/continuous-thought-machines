@@ -11,14 +11,6 @@
 #SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
-# Countix (RepNet paper) — same setup as train_countix_jz.sh but with the
-# ImageNet-pretrained ResNet18-2 backbone *unfrozen*, so the optimiser can
-# fine-tune the visual features for repetition-counting. Targets the
-# "frozen-features may be the bottleneck" hypothesis from
-# logs_jz/repetition/SUMMARY.md. ~12M extra trainable params, so AMP + the
-# default 16-batch is what fits cleanly on the A100.
-#set -e
-
 module load arch/a100
 module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
@@ -50,7 +42,7 @@ python -m tasks.repetition.train \
     --batch_size 16 \
     --batch_size_test 16 \
     --lr 1e-4 \
-    --training_iterations 10001 \
+    --training_iterations 20001 \
     --warmup_steps 2000 \
     --track_every 2000 \
     --save_every 2000 \

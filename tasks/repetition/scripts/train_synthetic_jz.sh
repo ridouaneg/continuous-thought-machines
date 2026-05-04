@@ -11,9 +11,6 @@
 #SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
-# Synthetic oscillating-dots — sanity check the FFT oscillator hypothesis.
-#set -e
-
 module load arch/a100
 module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
@@ -50,5 +47,6 @@ python -m tasks.repetition.train \
     --n_test_batches 10 \
     --log_dir logs/repetition/synthetic \
     --device 0 \
+    --use_amp \
     --seed 42 \
     "$@"

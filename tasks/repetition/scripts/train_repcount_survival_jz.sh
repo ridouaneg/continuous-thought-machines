@@ -45,8 +45,8 @@ python -m tasks.repetition.train \
     --batch_size 8 \
     --batch_size_test 8 \
     --lr 1e-4 \
-    --training_iterations 100001 \
-    --warmup_steps 2000 \
+    --training_iterations 15001 \
+    --warmup_steps 1500 \
     --track_every 2000 \
     --save_every 2000 \
     --n_test_batches 30 \

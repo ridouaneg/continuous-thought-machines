@@ -7,7 +7,7 @@
 
 python -m tasks.repetition.train \
     --dataset synthetic \
-    --target_fps 8 \
+    --target_fps 16 \
     --clip_duration_s_min 4 \
     --clip_duration_s_max 12 \
     --image_size 64 \
@@ -28,11 +28,13 @@ python -m tasks.repetition.train \
     --batch_size 16 \
     --batch_size_test 16 \
     --lr 1e-3 \
-    --training_iterations 2001 \
-    --warmup_steps 200 \
-    --track_every 200 \
-    --save_every 200 \
+    --training_iterations 10001 \
+    --warmup_steps 1000 \
+    --track_every 1000 \
+    --save_every 1000 \
     --n_test_batches 10 \
     --log_dir logs/repetition/synthetic \
-    --seed 42 --device 0 \
+    --device 0 \
+    --use_amp \
+    --seed 42 \
     "$@"

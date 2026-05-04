@@ -33,8 +33,8 @@ python -m tasks.repetition.train \
     --batch_size 16 \
     --batch_size_test 16 \
     --lr 1e-4 \
-    --training_iterations 100001 \
-    --warmup_steps 2000 \
+    --training_iterations 10001 \
+    --warmup_steps 1000 \
     --track_every 2000 \
     --save_every 2000 \
     --n_test_batches 30 \

@@ -11,11 +11,6 @@
 #SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
-# UCFRep — UCF-101 videos re-annotated with repetition counts (526 videos).
-# Annotations + symlink to UCF-101 videos must be prepared with
-# tasks.repetition.scripts.prepare_ucfrep before launching.
-#set -e
-
 module load arch/a100
 module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
@@ -45,7 +40,7 @@ python -m tasks.repetition.train \
     --batch_size_test 16 \
     --lr 1e-4 \
     --training_iterations 3001 \
-    --warmup_steps 200 \
+    --warmup_steps 300 \
     --track_every 300 \
     --save_every 500 \
     --n_test_batches 20 \

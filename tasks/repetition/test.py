@@ -1,13 +1,23 @@
-"""Smoke test for tasks/repetition datasets.
+"""Preflight check for tasks/repetition on titan / JZ.
 
-Auto-detects whether we are on JZ (lustre) or titan (/geovic) and reports,
-for each backend (synthetic, countix, repcount, ucfrep):
+Auto-detects the cluster (lustre vs /geovic) and runs two blocks:
 
-  - presence of the annotation/CSV/JSON files
-  - number of records listed in annotation
-  - number of videos actually present on disk
-  - whether the Dataset class instantiates and returns a sample of the
-    expected shape
+1. Environment — everything the train script needs to even start:
+     - Python deps + versions (torch, torchvision, numpy, cv2, matplotlib,
+       seaborn, tqdm)
+     - Repo-internal modules (tasks.repetition.{model,losses,utils},
+       tasks.video.model, utils.{housekeeping,run,schedulers})
+     - CUDA availability + device info + a tiny AMP autocast matmul
+       (mirrors the --use_amp path used in the JZ scripts)
+     - System ffmpeg on PATH
+     - Writable log dir, plus the JZ slurm output dir when on JZ
+
+2. Datasets — for each backend (synthetic, countix, repcount, ucfrep):
+     - presence of the annotation/CSV/JSON files
+     - number of records listed in annotation
+     - number of videos actually present on disk
+     - whether the Dataset class instantiates and returns a sample of the
+       expected shape
 
 Per-dataset roots can be overridden with CLI flags:
     python tasks/repetition/test.py --countix-root /path/to/countix \\
@@ -113,6 +123,120 @@ def _try_sample(ds, name: str) -> None:
         _ok(f"{name}: sample[0] -> frames {shape}, label={y!r} ({dt*1000:.0f} ms)")
     else:
         _ok(f"{name}: sample[0] -> {type(sample).__name__} ({dt*1000:.0f} ms)")
+
+
+# --------------------------------------------------------------------------- #
+# Environment checks
+# --------------------------------------------------------------------------- #
+
+PY_DEPS = [
+    "torch", "torchvision", "numpy", "cv2",
+    "matplotlib", "seaborn", "tqdm",
+]
+
+INTERNAL_MODULES = [
+    "tasks.repetition.dataset",
+    "tasks.repetition.model",
+    "tasks.repetition.losses",
+    "tasks.repetition.utils",
+    "tasks.video.model",
+    "utils.housekeeping",
+    "utils.run",
+    "utils.schedulers",
+]
+
+
+def check_python() -> None:
+    _hr("python")
+    print(f"  executable : {sys.executable}")
+    print(f"  version    : {sys.version.split()[0]}")
+
+
+def check_python_deps() -> None:
+    _hr("python deps")
+    import importlib
+    for name in PY_DEPS:
+        try:
+            mod = importlib.import_module(name)
+            ver = getattr(mod, "__version__", "?")
+            _ok(f"{name:12s} {ver}")
+        except Exception as exc:
+            _err(f"{name}: import failed ({exc})")
+
+
+def check_internal_modules() -> None:
+    _hr("repo internal modules")
+    import importlib
+    for name in INTERNAL_MODULES:
+        try:
+            importlib.import_module(name)
+            _ok(name)
+        except Exception as exc:
+            _err(f"{name}: import failed ({exc})")
+            traceback.print_exc()
+
+
+def check_cuda_and_amp() -> None:
+    _hr("cuda + amp")
+    try:
+        import torch
+    except Exception as exc:
+        _err(f"torch import failed: {exc}")
+        return
+    if not torch.cuda.is_available():
+        _warn("CUDA not available — train scripts assume a GPU")
+        return
+    print(f"  cuda runtime : {torch.version.cuda}")
+    print(f"  device count : {torch.cuda.device_count()}")
+    for i in range(torch.cuda.device_count()):
+        cap = torch.cuda.get_device_capability(i)
+        print(f"    [{i}] {torch.cuda.get_device_name(i)}  sm_{cap[0]}{cap[1]}")
+    try:
+        device = torch.device("cuda:0")
+        with torch.cuda.amp.autocast(dtype=torch.float16):
+            x = torch.randn(64, 64, device=device)
+            y = x @ x
+        torch.cuda.synchronize()
+        _ok(f"AMP autocast matmul ok (out dtype={y.dtype})")
+    except Exception as exc:
+        _err(f"AMP autocast matmul failed: {exc}")
+        traceback.print_exc()
+
+
+def check_ffmpeg() -> None:
+    _hr("ffmpeg")
+    import shutil
+    import subprocess
+    bin_path = shutil.which("ffmpeg")
+    if not bin_path:
+        _err("ffmpeg not on PATH (on JZ: 'module load ffmpeg/6.1.1')")
+        return
+    print(f"  binary : {bin_path}")
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-version"], capture_output=True, text=True, timeout=5,
+        )
+        line = (out.stdout or out.stderr).splitlines()
+        _ok(line[0] if line else "ffmpeg ran but produced no output")
+    except Exception as exc:
+        _err(f"ffmpeg call failed: {exc}")
+
+
+def check_writable_paths(cluster: str) -> None:
+    _hr("writable paths (logs / slurm)")
+    paths = [os.path.join(_REPO_ROOT, "logs", "repetition")]
+    if cluster == "jz":
+        paths.append("/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm")
+    for p in paths:
+        try:
+            os.makedirs(p, exist_ok=True)
+            probe = os.path.join(p, ".smoketest_write")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.remove(probe)
+            _ok(f"writable: {p}")
+        except Exception as exc:
+            _err(f"not writable: {p} ({exc})")
 
 
 # --------------------------------------------------------------------------- #
@@ -341,6 +465,14 @@ def main():
     for k, v in roots.items():
         exists = os.path.isdir(v) if v else False
         print(f"  {k:10s} -> {v}  (exists={exists})")
+
+    # Environment preflight — always on, light, runs before dataset checks.
+    check_python()
+    check_python_deps()
+    check_internal_modules()
+    check_cuda_and_amp()
+    check_ffmpeg()
+    check_writable_paths(cluster)
 
     todo = ([args.only] if args.only
             else ["synthetic", "synthetic-v2", "countix", "repcount", "ucfrep"])

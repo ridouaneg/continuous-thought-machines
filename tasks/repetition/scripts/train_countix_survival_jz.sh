@@ -11,11 +11,6 @@
 #SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
-# Countix (RepNet paper) with the CORN-style survival head.
-# Identical to train_countix_jz.sh except --head_type survival and a
-# distinct log dir so it doesn't clobber the CE baseline.
-#set -e
-
 module load arch/a100
 module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
@@ -48,7 +43,7 @@ python -m tasks.repetition.train \
     --batch_size_test 16 \
     --lr 1e-4 \
     --training_iterations 10001 \
-    --warmup_steps 2000 \
+    --warmup_steps 1000 \
     --track_every 2000 \
     --save_every 2000 \
     --n_test_batches 30 \
