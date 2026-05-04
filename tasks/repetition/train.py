@@ -26,10 +26,12 @@ sns.set_style("darkgrid")
 if torch.cuda.is_available():
     torch.set_float32_matmul_precision("high")
 
-from tasks.repetition.dataset import build_datasets
-from tasks.repetition.losses import count_loss
+from tasks.repetition.dataset import build_datasets, video_count_collate
+from tasks.repetition.losses import count_loss, count_loss_survival
 from tasks.repetition.model import ContinuousThoughtMachineRepCount
-from tasks.repetition.utils import count_from_buckets, mae, obo_accuracy
+from tasks.repetition.utils import (
+    count_from_buckets, count_from_hazards, extract_counts, mae, obo_accuracy,
+)
 from utils.housekeeping import set_seed
 from utils.run import init_run, load_checkpoint, save_checkpoint
 from utils.schedulers import WarmupCosineAnnealingLR, WarmupMultiStepLR, warmup
@@ -40,20 +42,40 @@ def parse_args():
 
     # Dataset
     parser.add_argument("--dataset", type=str, default="synthetic",
-                        choices=["synthetic", "countix", "repcount", "ucfrep"])
+                        choices=["synthetic", "synthetic-v2", "countix", "repcount", "ucfrep"])
     parser.add_argument("--data_root", type=str, default="data/repetition")
     parser.add_argument("--kinetics_root", type=str, default=None,
                         help="For --dataset countix: root of an official Kinetics-400 "
                              "mirror, used to look up videos by youtube_id when the "
                              "Countix CSVs are not co-located with the videos.")
     parser.add_argument("--n_frames", type=int, default=64,
-                        help="Frames sampled per clip. Nyquist limit = n_frames / 2 reps.")
+                        help="Frames sampled per clip in legacy TSN mode. "
+                             "Used by real datasets only when target_fps<=0; "
+                             "ignored for the synthetic backend (which always "
+                             "uses fps-based sampling).")
+    parser.add_argument("--target_fps", type=float, default=8.0,
+                        help="Frames sampled per second. Required for synthetic. "
+                             "For real datasets (countix/repcount/ucfrep): "
+                             "any value > 0 enables FPS-based variable-length "
+                             "sampling (each clip gets T = round(duration_s × "
+                             "target_fps) frames); set to 0 or negative to "
+                             "fall back to legacy fixed n_frames TSN sampling.")
+    parser.add_argument("--clip_duration_s_min", type=float, default=4.0,
+                        help="Synthetic-only — lower bound on per-clip duration.")
+    parser.add_argument("--clip_duration_s_max", type=float, default=12.0,
+                        help="Synthetic-only — upper bound on per-clip duration. "
+                             "Set equal to _min for fixed-length clips.")
     parser.add_argument("--image_size", type=int, default=112)
     parser.add_argument("--max_count", type=int, default=16,
                         help="Max oscillation count for the synthetic dataset.")
     parser.add_argument("--n_count_buckets", type=int, default=32,
                         help="Number of discrete count classes. Labels >= n_count_buckets "
                              "are clamped to n_count_buckets-1.")
+    parser.add_argument("--head_type", type=str, default="classification",
+                        choices=["classification", "survival"],
+                        help="Loss/decoder framing. 'classification' is vanilla "
+                             "K-way categorical CE; 'survival' is CORN-style "
+                             "discrete-hazard BCE (ordinal).")
 
     # Model
     parser.add_argument("--d_model", type=int, default=512)
@@ -135,16 +157,11 @@ def _log_split_stats(ds, name: str, n_count_buckets: int) -> None:
     if n == 0:
         return
 
-    # Real datasets expose .records with integer 'count' fields.
+    counts = extract_counts(ds).tolist()
     if hasattr(ds, "records") and ds.records and "count" in ds.records[0]:
-        counts = [int(r["count"]) for r in ds.records]
-    else:
-        # Synthetic: labels are deterministic per index, so we can sample
-        # them cheaply (the CPU-only synth __getitem__ is fast).
-        sample_n = min(n, 2048)
-        counts = [int(ds[i][1]) for i in range(sample_n)]
-        if sample_n < n:
-            print(f"    (count histogram from first {sample_n}/{n} samples)")
+        pass  # used the full record list
+    elif len(counts) < n:
+        print(f"    (count histogram from first {len(counts)}/{n} samples)")
 
     arr = np.asarray(counts)
     n_clamped = int((arr >= n_count_buckets).sum())
@@ -180,30 +197,76 @@ def _log_split_stats(ds, name: str, n_count_buckets: int) -> None:
     print(f"    top modes: {pretty}")
 
 
+def _dispatch_head(head_type: str):
+    """Pick (loss_fn, decode_fn) for the requested head."""
+    if head_type == "survival":
+        return count_loss_survival, count_from_hazards
+    return count_loss, count_from_buckets
+
+
 def main():
     args = parse_args()
     args.out_dims = args.n_count_buckets
+    loss_fn, decode_fn = _dispatch_head(args.head_type)
+    print(f"head_type={args.head_type}  loss={loss_fn.__name__}  decode={decode_fn.__name__}")
     set_seed(args.seed, deterministic=False)
     init_run(args)
+    print(f"Output dir: {os.path.abspath(args.log_dir)}")
 
     # --- Data ---
+    # FPS-based variable-length sampling is gated by ``--target_fps > 0``.
+    # The synthetic backend always uses it (it has no fixed-T fallback).
+    # Real backends opt in: when target_fps > 0, they switch from TSN
+    # fixed-``n_frames`` sampling to ``_decode_clip_fps`` and produce
+    # variable-T clips that share a batch via padding + frame mask.
+    fps = args.target_fps if args.target_fps and args.target_fps > 0 else None
+    args.is_variable_length = (
+        args.dataset in ("synthetic", "synthetic-v2") or fps is not None
+    )
+
+    extra = {}
+    if args.dataset in ("synthetic", "synthetic-v2"):
+        extra = dict(
+            target_fps=fps,
+            duration_s_min=args.clip_duration_s_min,
+            duration_s_max=args.clip_duration_s_max,
+        )
+    elif fps is not None:
+        extra = dict(target_fps=fps)
     train_data, test_data = build_datasets(
         args.dataset, args.data_root, args.n_frames, args.image_size,
         max_count=args.max_count, kinetics_root=args.kinetics_root,
+        **extra,
     )
+
     print(f"Dataset={args.dataset}  train={len(train_data)}  test={len(test_data)}  "
           f"buckets={args.n_count_buckets}  max_count={args.max_count}")
+    if args.is_variable_length:
+        if args.dataset in ("synthetic", "synthetic-v2"):
+            print(f"  variable-length sampling: target_fps={fps} "
+                  f"duration_s∈[{args.clip_duration_s_min}, {args.clip_duration_s_max}]")
+        else:
+            print(f"  variable-length sampling: target_fps={fps} "
+                  f"(real-dataset clip durations come from the source videos)")
+    else:
+        print(f"  fixed-count TSN sampling: n_frames={args.n_frames}")
     print("Dataset stats:")
     _log_split_stats(train_data, "train", args.n_count_buckets)
     _log_split_stats(test_data,  "test ", args.n_count_buckets)
+    print("(For chance-level reference, run "
+          "`python -m tasks.repetition.baselines.modal_count` with the same "
+          "--dataset / --data_root / --n_count_buckets.)")
 
+    collate_fn = video_count_collate if args.is_variable_length else None
     train_loader = torch.utils.data.DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers_train, drop_last=True, pin_memory=False,
+        collate_fn=collate_fn,
     )
     test_loader = torch.utils.data.DataLoader(
         test_data, batch_size=args.batch_size_test, shuffle=True,
         num_workers=args.num_workers_test, drop_last=False, pin_memory=False,
+        collate_fn=collate_fn,
     )
 
     # --- Model ---
@@ -235,7 +298,14 @@ def main():
     ).to(device)
 
     dummy_clip, _ = train_data[0]
-    model(dummy_clip.unsqueeze(0).to(device))
+    dummy_clip_b = dummy_clip.unsqueeze(0).to(device)
+    if args.is_variable_length:
+        dummy_mask = torch.ones(
+            (1, dummy_clip_b.shape[1]), dtype=torch.bool, device=device,
+        )
+        model(dummy_clip_b, frame_mask=dummy_mask)
+    else:
+        model(dummy_clip_b)
     print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
 
     # Wrap in DataParallel when multiple GPU IDs are given (e.g. --device 0 1).
@@ -308,21 +378,33 @@ def main():
               leave=False, dynamic_ncols=True) as pbar:
         for bi in range(start_iter, args.training_iterations):
             try:
-                clips, targets = next(data_iter)
+                batch = next(data_iter)
             except StopIteration:
                 data_iter = iter(train_loader)
-                clips, targets = next(data_iter)
+                batch = next(data_iter)
 
-            clips = clips.to(device, non_blocking=True)
-            targets = targets.to(device, non_blocking=True)
+            clips, frame_mask, targets = _unpack_batch(batch, device)
 
             with torch.autocast(
                 device_type="cuda" if "cuda" in device else "cpu",
                 dtype=torch.float16, enabled=args.use_amp,
             ):
-                predictions, certainties, _ = model(clips)
-                loss, where_certain = count_loss(
-                    predictions, certainties, targets, use_most_certain=True
+                if frame_mask is not None:
+                    predictions, certainties, _, tick_mask = model(
+                        clips, frame_mask=frame_mask
+                    )
+                else:
+                    out = model(clips)
+                    # Backward compat: model now always returns 4 values, but
+                    # if a future caller wraps it differently, accept 3 too.
+                    if len(out) == 4:
+                        predictions, certainties, _, tick_mask = out
+                    else:
+                        predictions, certainties, _ = out
+                        tick_mask = None
+                loss, where_certain = loss_fn(
+                    predictions, certainties, targets,
+                    use_most_certain=True, tick_mask=tick_mask,
                 )
 
             # Quick train-batch metric for the progress bar.
@@ -330,7 +412,7 @@ def main():
                 B = predictions.size(0)
                 batch_idx = torch.arange(B, device=device)
                 mc_logits = predictions[batch_idx, :, where_certain]    # (B, buckets)
-                _, argmax_counts = count_from_buckets(mc_logits)
+                _, argmax_counts = decode_fn(mc_logits)
                 batch_obo = obo_accuracy(argmax_counts, targets)
 
             scaler.scale(loss).backward()
@@ -359,6 +441,11 @@ def main():
                 train_mae_per_tick.append(tr[2]); test_mae_per_tick.append(te[2])
                 train_obo_mc.append(tr[3]); test_obo_mc.append(te[3])
                 train_mae_mc.append(tr[4]); test_mae_mc.append(te[4])
+                print(
+                    f"[eval @ iter {bi}]  "
+                    f"train OBO={tr[3]:.3f} MAE={tr[4]:.3f}  |  "
+                    f"test OBO={te[3]:.3f} MAE={te[4]:.3f}"
+                )
                 _plot_metrics(
                     args, iters,
                     train_losses, test_losses,
@@ -392,44 +479,76 @@ def main():
                 }, bi)
 
 
+def _unpack_batch(batch, device):
+    """Return (clips, frame_mask_or_None, targets) on the given device."""
+    if len(batch) == 3:
+        clips, frame_mask, targets = batch
+        clips = clips.to(device, non_blocking=True)
+        frame_mask = frame_mask.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+        return clips, frame_mask, targets
+    clips, targets = batch
+    clips = clips.to(device, non_blocking=True)
+    targets = targets.to(device, non_blocking=True)
+    return clips, None, targets
+
+
 def _evaluate(model, loader, device, args, use_inference_mode):
-    """Evaluate on loader. Returns (loss, per_tick_obo, per_tick_mae, mc_obo, mc_mae)."""
+    """Evaluate on loader. Returns (loss, per_tick_obo, per_tick_mae, mc_obo, mc_mae).
+
+    For variable-length batches (synthetic with FPS sampling) the per-tick
+    arrays are empty — different batches have different T_max, so per-tick
+    aggregation across the loader isn't well-defined and the most-certain
+    metrics are what we track.
+    """
     model.eval()
-    T = args.n_frames * args.iterations_per_frame
+    loss_fn, decode_fn = _dispatch_head(args.head_type)
 
     all_targets, all_argmax_per_tick, all_expected_per_tick = [], [], []
     all_argmax_mc, all_expected_mc, all_losses = [], [], []
 
     context = torch.inference_mode() if use_inference_mode else torch.no_grad()
     with context:
-        for i, (clips, targets) in enumerate(loader):
-            clips = clips.to(device)
-            targets = targets.to(device)
-            predictions, certainties, _ = model(clips)
+        for i, batch in enumerate(loader):
+            clips, frame_mask, targets = _unpack_batch(batch, device)
+            if frame_mask is not None:
+                predictions, certainties, _, tick_mask = model(clips, frame_mask=frame_mask)
+            else:
+                out = model(clips)
+                if len(out) == 4:
+                    predictions, certainties, _, tick_mask = out
+                else:
+                    predictions, certainties, _ = out
+                    tick_mask = None
 
-            loss, where_certain = count_loss(
-                predictions, certainties, targets, use_most_certain=True
+            loss, where_certain = loss_fn(
+                predictions, certainties, targets,
+                use_most_certain=True, tick_mask=tick_mask,
             )
             all_losses.append(loss.item())
 
             B = predictions.size(0)
             batch_idx = torch.arange(B, device=device)
 
-            # Per-tick predictions: (B, T) argmax and expected counts.
-            preds_T = predictions.permute(0, 2, 1)              # (B, T, n_buckets)
-            expected_T, argmax_T = count_from_buckets(
-                preds_T.reshape(B * T, args.n_count_buckets)
-            )
-            expected_T = expected_T.reshape(B, T)
-            argmax_T = argmax_T.reshape(B, T)
+            # Per-tick aggregation only makes sense when T is fixed across the
+            # whole loader. Skip it for variable-length batches.
+            if not args.is_variable_length:
+                T = predictions.size(-1)
+                preds_T = predictions.permute(0, 2, 1)              # (B, T, n_buckets)
+                expected_T, argmax_T = decode_fn(
+                    preds_T.reshape(B * T, args.n_count_buckets)
+                )
+                expected_T = expected_T.reshape(B, T)
+                argmax_T = argmax_T.reshape(B, T)
 
             # Most-certain tick selection.
             mc_logits = predictions[batch_idx, :, where_certain]    # (B, n_buckets)
-            expected_mc_batch, argmax_mc_batch = count_from_buckets(mc_logits)
+            expected_mc_batch, argmax_mc_batch = decode_fn(mc_logits)
 
             all_targets.append(targets.cpu())
-            all_argmax_per_tick.append(argmax_T.cpu())
-            all_expected_per_tick.append(expected_T.cpu())
+            if not args.is_variable_length:
+                all_argmax_per_tick.append(argmax_T.cpu())
+                all_expected_per_tick.append(expected_T.cpu())
             all_argmax_mc.append(argmax_mc_batch.cpu())
             all_expected_mc.append(expected_mc_batch.cpu())
 
@@ -437,18 +556,23 @@ def _evaluate(model, loader, device, args, use_inference_mode):
                 break
 
     all_targets = torch.cat(all_targets)                            # (N,)
-    all_argmax_pt = torch.cat(all_argmax_per_tick)                  # (N, T)
-    all_expected_pt = torch.cat(all_expected_per_tick)              # (N, T)
     all_argmax_mc = torch.cat(all_argmax_mc)                        # (N,)
     all_expected_mc = torch.cat(all_expected_mc)                    # (N,)
 
-    # Per-tick OBO and MAE: average over samples at each tick.
-    per_tick_obo = (
-        (all_argmax_pt.float() - all_targets.float().unsqueeze(1)).abs() <= 1
-    ).float().mean(dim=0).numpy()                                   # (T,)
-    per_tick_mae = (
-        (all_expected_pt.float() - all_targets.float().unsqueeze(1)).abs()
-    ).mean(dim=0).numpy()                                           # (T,)
+    if args.is_variable_length:
+        # Per-tick aggregation isn't well-defined across batches with
+        # different T_max; report as empty.
+        per_tick_obo = np.zeros(0, dtype=np.float32)
+        per_tick_mae = np.zeros(0, dtype=np.float32)
+    else:
+        all_argmax_pt = torch.cat(all_argmax_per_tick)              # (N, T)
+        all_expected_pt = torch.cat(all_expected_per_tick)          # (N, T)
+        per_tick_obo = (
+            (all_argmax_pt.float() - all_targets.float().unsqueeze(1)).abs() <= 1
+        ).float().mean(dim=0).numpy()                               # (T,)
+        per_tick_mae = (
+            (all_expected_pt.float() - all_targets.float().unsqueeze(1)).abs()
+        ).mean(dim=0).numpy()                                       # (T,)
 
     mc_obo = obo_accuracy(all_argmax_mc, all_targets)
     mc_mae = mae(all_expected_mc, all_targets)
@@ -464,7 +588,8 @@ def _plot_metrics(
     train_obo_mc, test_obo_mc,
     train_mae_mc, test_mae_mc,
 ):
-    T = len(train_obo_per_tick[-1]) if train_obo_per_tick else 1
+    have_per_tick = bool(train_obo_per_tick) and len(train_obo_per_tick[-1]) > 0
+    T = len(train_obo_per_tick[-1]) if have_per_tick else 1
     cm = plt.cm.viridis
 
     # --- Loss ---
@@ -477,11 +602,12 @@ def _plot_metrics(
 
     # --- OBO accuracy ---
     fig, axes = plt.subplots(2, 1, figsize=(10, 6))
-    tr_obo = np.array(train_obo_per_tick)
-    te_obo = np.array(test_obo_per_tick)
-    for t in range(T):
-        axes[0].plot(iters, tr_obo[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
-        axes[1].plot(iters, te_obo[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
+    if have_per_tick:
+        tr_obo = np.array(train_obo_per_tick)
+        te_obo = np.array(test_obo_per_tick)
+        for t in range(T):
+            axes[0].plot(iters, tr_obo[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
+            axes[1].plot(iters, te_obo[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
     axes[0].plot(iters, train_obo_mc, "k--", label="most-certain", lw=1.5)
     axes[1].plot(iters, test_obo_mc, "k--", label="most-certain", lw=1.5)
     axes[0].set_title("train OBO accuracy (per tick, black = most certain)")
@@ -492,11 +618,12 @@ def _plot_metrics(
 
     # --- MAE ---
     fig, axes = plt.subplots(2, 1, figsize=(10, 6))
-    tr_mae = np.array(train_mae_per_tick)
-    te_mae = np.array(test_mae_per_tick)
-    for t in range(T):
-        axes[0].plot(iters, tr_mae[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
-        axes[1].plot(iters, te_mae[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
+    if have_per_tick:
+        tr_mae = np.array(train_mae_per_tick)
+        te_mae = np.array(test_mae_per_tick)
+        for t in range(T):
+            axes[0].plot(iters, tr_mae[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
+            axes[1].plot(iters, te_mae[:, t], color=cm(t / max(1, T - 1)), alpha=0.3)
     axes[0].plot(iters, train_mae_mc, "k--", label="most-certain", lw=1.5)
     axes[1].plot(iters, test_mae_mc, "k--", label="most-certain", lw=1.5)
     axes[0].set_title("train MAE (per tick, black = most certain)")

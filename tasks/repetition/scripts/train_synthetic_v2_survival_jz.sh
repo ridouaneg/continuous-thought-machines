@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ctm_rep_synth
+#SBATCH --job-name=ctm_rep_synth_v2_surv
 #SBATCH -A oyr@a100
 #SBATCH -C a100
 #SBATCH --nodes=1
@@ -11,7 +11,9 @@
 #SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
-# Synthetic oscillating-dots — sanity check the FFT oscillator hypothesis.
+# Synthetic-v2 oscillating-dots with the CORN-style survival head.
+# Identical to train_synthetic_v2_jz.sh except --head_type survival and a
+# distinct log dir so it doesn't clobber the CE baseline.
 #set -e
 
 module load arch/a100
@@ -21,13 +23,14 @@ source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.
 cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
 
 python -m tasks.repetition.train \
-    --dataset synthetic \
-    --target_fps 16 \
+    --dataset synthetic-v2 \
+    --head_type survival \
+    --target_fps 8 \
     --clip_duration_s_min 4 \
     --clip_duration_s_max 12 \
     --image_size 64 \
-    --max_count 8 \
-    --n_count_buckets 16 \
+    --max_count 16 \
+    --n_count_buckets 32 \
     --d_model 256 \
     --d_input 128 \
     --heads 4 \
@@ -38,17 +41,16 @@ python -m tasks.repetition.train \
     --memory_length 32 \
     --memory_hidden_dims 16 \
     --backbone_type resnet18-1 \
-    --no-pretrained_backbone \
     --positional_embedding_type none \
     --batch_size 16 \
     --batch_size_test 16 \
-    --lr 1e-3 \
-    --training_iterations 10001 \
-    --warmup_steps 1000 \
-    --track_every 1000 \
-    --save_every 1000 \
+    --lr 3e-4 \
+    --training_iterations 2001 \
+    --warmup_steps 200 \
+    --track_every 500 \
+    --save_every 500 \
     --n_test_batches 10 \
-    --log_dir logs/repetition/synthetic \
+    --log_dir logs/repetition/synthetic_v2_survival \
     --device 0 \
     --seed 42 \
     "$@"

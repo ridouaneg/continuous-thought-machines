@@ -34,6 +34,7 @@ from tasks.repetition.dataset import (  # noqa: E402
     CountixDataset,
     RepCountADataset,
     SyntheticOscillatingDots,
+    SyntheticOscillatingDotsV2,
     UCFRepDataset,
     _build_kinetics_youtube_id_index,
 )
@@ -45,7 +46,7 @@ from tasks.repetition.dataset import (  # noqa: E402
 
 JZ_ROOTS = {
     "countix":  "/lustre/fsn1/projects/rech/kcn/ucm72yx/data/countix",
-    "kinetics": "/lustre/fsmisc/dataset/kinetics",
+    "kinetics": "/lustre/fsn1/projects/rech/kcn/ucm72yx/data/kinetics",
     "repcount": "/lustre/fsn1/projects/rech/kcn/ucm72yx/data/repcount",
     "ucfrep":   "/lustre/fsn1/projects/rech/kcn/ucm72yx/data/ucfrep",
 }
@@ -122,12 +123,28 @@ def check_synthetic() -> None:
     _hr("synthetic (SyntheticOscillatingDots)")
     try:
         ds = SyntheticOscillatingDots(
-            n_samples=8, n_frames=16, image_size=32, max_count=8, split="train"
+            n_samples=8, target_fps=8.0, duration_s_min=2.0, duration_s_max=4.0,
+            image_size=32, max_count=8, split="train",
         )
         _ok(f"instantiated, len={len(ds)}")
         _try_sample(ds, "synthetic")
     except Exception as exc:
         _err(f"synthetic: {exc}")
+        traceback.print_exc()
+
+
+def check_synthetic_v2() -> None:
+    _hr("synthetic-v2 (SyntheticOscillatingDotsV2)")
+    try:
+        ds = SyntheticOscillatingDotsV2(
+            n_samples=8, target_fps=8.0, duration_s_min=2.0, duration_s_max=4.0,
+            image_size=32, max_count=8, min_active_s=1.5, max_segments=3,
+            noise_std=0.02, split="train",
+        )
+        _ok(f"instantiated, len={len(ds)}")
+        _try_sample(ds, "synthetic-v2")
+    except Exception as exc:
+        _err(f"synthetic-v2: {exc}")
         traceback.print_exc()
 
 
@@ -297,7 +314,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cluster", choices=("auto", "jz", "titan"), default="auto",
                         help="select default data roots (overridden by --*-root flags)")
-    parser.add_argument("--only", choices=("synthetic", "countix", "repcount", "ucfrep"),
+    parser.add_argument("--only",
+                        choices=("synthetic", "synthetic-v2", "countix", "repcount", "ucfrep"),
                         default=None, help="limit to one dataset")
     parser.add_argument("--countix-root",  default=None)
     parser.add_argument("--kinetics-root", default=None,
@@ -324,9 +342,12 @@ def main():
         exists = os.path.isdir(v) if v else False
         print(f"  {k:10s} -> {v}  (exists={exists})")
 
-    todo = [args.only] if args.only else ["synthetic", "countix", "repcount", "ucfrep"]
+    todo = ([args.only] if args.only
+            else ["synthetic", "synthetic-v2", "countix", "repcount", "ucfrep"])
     if "synthetic" in todo:
         check_synthetic()
+    if "synthetic-v2" in todo:
+        check_synthetic_v2()
     if "countix" in todo:
         check_countix(roots.get("countix"), roots.get("kinetics"))
     if "repcount" in todo:

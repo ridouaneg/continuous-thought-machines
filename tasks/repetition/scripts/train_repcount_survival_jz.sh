@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ctm_repcount
+#SBATCH --job-name=ctm_repcount_surv
 #SBATCH -A oyr@a100
 #SBATCH -C a100
 #SBATCH --nodes=1
@@ -11,7 +11,9 @@
 #SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
-# RepCount-A (TransRAC paper) — dense repetition-counting benchmark.
+# RepCount-A (TransRAC paper) with the CORN-style survival head.
+# Identical to train_repcount_jz.sh except --head_type survival and a
+# distinct log dir so it doesn't clobber the CE baseline.
 #set -e
 
 module load arch/a100
@@ -24,6 +26,7 @@ DATA_ROOT="/lustre/fsn1/projects/rech/kcn/ucm72yx/data/repcount/"
 
 python -m tasks.repetition.train \
     --dataset repcount \
+    --head_type survival \
     --data_root "${DATA_ROOT}" \
     --target_fps 8 \
     --image_size 112 \
@@ -48,7 +51,7 @@ python -m tasks.repetition.train \
     --save_every 2000 \
     --n_test_batches 30 \
     --dropout 0.1 \
-    --log_dir logs/repetition/repcount \
+    --log_dir logs/repetition/repcount_survival \
     --device 0 \
     --use_amp \
     --seed 42 \

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ctm_rep_synth
+#SBATCH --job-name=ctm_rep_synth_surv
 #SBATCH -A oyr@a100
 #SBATCH -C a100
 #SBATCH --nodes=1
@@ -11,7 +11,9 @@
 #SBATCH --output=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/kcn/ucm72yx/slurm/ctm/%j.err
 
-# Synthetic oscillating-dots — sanity check the FFT oscillator hypothesis.
+# Synthetic oscillating-dots with the CORN-style survival head.
+# Identical to train_synthetic_jz.sh except --head_type survival and a
+# distinct log dir so it doesn't clobber the CE baseline.
 #set -e
 
 module load arch/a100
@@ -22,6 +24,7 @@ cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
 
 python -m tasks.repetition.train \
     --dataset synthetic \
+    --head_type survival \
     --target_fps 16 \
     --clip_duration_s_min 4 \
     --clip_duration_s_max 12 \
@@ -48,7 +51,7 @@ python -m tasks.repetition.train \
     --track_every 1000 \
     --save_every 1000 \
     --n_test_batches 10 \
-    --log_dir logs/repetition/synthetic \
+    --log_dir logs/repetition/synthetic_survival \
     --device 0 \
     --seed 42 \
     "$@"

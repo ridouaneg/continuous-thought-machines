@@ -21,13 +21,13 @@ source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.
 cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
 
 DATA_ROOT="/lustre/fsn1/projects/rech/kcn/ucm72yx/data/countix/"
-KINETICS_ROOT="/lustre/fsmisc/dataset/kinetics/"
+KINETICS_ROOT="/lustre/fsn1/projects/rech/kcn/ucm72yx/data/kinetics/"
 
 python -m tasks.repetition.train \
     --dataset countix \
     --data_root "${DATA_ROOT}" \
     --kinetics_root "${KINETICS_ROOT}" \
-    --n_frames 64 \
+    --target_fps 8 \
     --image_size 112 \
     --n_count_buckets 32 \
     --d_model 1024 \

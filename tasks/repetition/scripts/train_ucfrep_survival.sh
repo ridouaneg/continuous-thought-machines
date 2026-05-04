@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# UCFRep — UCF-101 videos re-annotated with repetition counts (526 videos:
-# 421 train / 105 test).
+# UCFRep with the CORN-style survival head.
+# Identical to train_ucfrep.sh except --head_type survival and a distinct
+# log dir so it doesn't clobber the CE baseline.
 #
-# Before running, prepare annotations + symlink with:
-#   python -m tasks.repetition.scripts.prepare_ucfrep \
-#       --data_root /geovic/ghermi/data/ucfrep \
-#       --ucf101_videos /geovic/geovic/UCF-101/videos
+# Same data prerequisites as train_ucfrep.sh — see that script's header.
 #
-# UCFRep counts go up to ~53, so n_count_buckets=64 covers the range.
+# UCFRep counts go up to ~53; the CE baseline uses n_count_buckets=32 (so
+# the high-count tail clamps to bin 31). We mirror that for an apples-to-
+# apples comparison — bump both scripts to 64 if the tail matters.
 #set -e
 
 DATA_ROOT="/geovic/ghermi/data/ucfrep/"
-#UCF_ROOT="/geovic/geovic/UCF-101/videos/"
 
 python -m tasks.repetition.train \
     --dataset ucfrep \
+    --head_type survival \
     --data_root "${DATA_ROOT}" \
     --target_fps 8 \
     --image_size 112 \
@@ -39,7 +39,7 @@ python -m tasks.repetition.train \
     --save_every 500 \
     --n_test_batches 20 \
     --dropout 0.1 \
-    --log_dir logs/repetition/ucfrep \
+    --log_dir logs/repetition/ucfrep_survival \
     --device 0 \
     --use_amp \
     --seed 42

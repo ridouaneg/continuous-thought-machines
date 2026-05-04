@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
-# RepCount-A (TransRAC paper) — dense repetition-counting benchmark.
+# RepCount-A (TransRAC paper) with the CORN-style survival head.
+# Identical to train_repcount.sh except --head_type survival and a distinct
+# log dir so it doesn't clobber the CE baseline.
 #
-# Before running:
-#   1. Download RepCount-A from https://github.com/SvipRepetitionCounting/TransRAC
-#   2. Place annotation CSVs as:
-#        ${DATA_ROOT}/annotation/train.csv
-#        ${DATA_ROOT}/annotation/valid.csv
-#        ${DATA_ROOT}/annotation/test.csv
-#      Expected CSV columns: name (video filename), count (integer).
-#   3. Place video files as:
-#        ${DATA_ROOT}/videos/<video_name>
+# Same data prerequisites as train_repcount.sh — see that script's header.
 #
-# RepCount-A has counts up to ~50, so n_count_buckets=64 is recommended.
-# Alternatively, use 32 buckets and set clips with count > 31 to bucket 31.
+# RepCount-A has counts up to ~50; the CE baseline already uses
+# n_count_buckets=64 so we mirror that here. Survival's tail-absorbing bin
+# at K-1 will catch any clamped samples — bump K higher if the long tail
+# matters more for your eval.
 #set -e
 
 DATA_ROOT="/geovic/ghermi/data/repcount/"
 
 python -m tasks.repetition.train \
     --dataset repcount \
+    --head_type survival \
     --data_root "${DATA_ROOT}" \
     --target_fps 8 \
     --image_size 112 \
@@ -43,7 +40,7 @@ python -m tasks.repetition.train \
     --save_every 2000 \
     --n_test_batches 30 \
     --dropout 0.1 \
-    --log_dir logs/repetition/repcount \
+    --log_dir logs/repetition/repcount_survival \
     --device 0 \
     --use_amp \
     --seed 42 \

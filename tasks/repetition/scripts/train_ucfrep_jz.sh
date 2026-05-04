@@ -27,7 +27,7 @@ DATA_ROOT="/lustre/fsn1/projects/rech/kcn/ucm72yx/data/ucfrep/"
 python -m tasks.repetition.train \
     --dataset ucfrep \
     --data_root "${DATA_ROOT}" \
-    --n_frames 64 \
+    --target_fps 8 \
     --image_size 112 \
     --n_count_buckets 32 \
     --d_model 512 \

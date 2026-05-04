@@ -60,8 +60,16 @@ Four backends:
 
   JSON: list of {"video_name": "<Class>/<video>.avi", "count": N, "split": "train|test"}
 
-All real-video datasets share the same TSN-style segment sampling and
-ImageNet normalisation as tasks/video/dataset.py.
+All real-video datasets accept an optional ``target_fps`` parameter:
+
+- ``target_fps=None`` (default): legacy fixed-count TSN sampling — pick
+  ``n_frames`` indices via ``_decode_clip``. Same behaviour as before.
+- ``target_fps>0``: FPS-based sampling — pick
+  ``round(duration_s * target_fps)`` indices via ``_decode_clip_fps``,
+  yielding variable-T clips that share a batch via ``video_count_collate``.
+  Real-time interpretation: at fps=8, each emitted frame represents 125 ms.
+
+ImageNet normalisation matches ``tasks/video/dataset.py`` in both modes.
 """
 
 from __future__ import annotations
@@ -103,12 +111,17 @@ def _read_video_frames(
     path: str,
     start_sec: Optional[float] = None,
     end_sec: Optional[float] = None,
-) -> torch.Tensor:
-    """Decode a video into a (T, C, H, W) uint8 tensor.
+) -> Tuple[torch.Tensor, float]:
+    """Decode a video into a (T, C, H, W) uint8 tensor + its native FPS.
 
     Prefers ``torchvision.io.read_video`` when available; falls back to
     OpenCV otherwise. ``read_video`` was removed from torchvision in
     version 0.24, so the OpenCV path is the working backend on newer envs.
+
+    Returns:
+        (frames, native_fps). ``native_fps`` is needed by the FPS-based
+        sampler in :func:`_decode_clip_fps` to decide stride; it is ignored
+        by the legacy fixed-count :func:`_decode_clip`.
     """
     try:
         from torchvision.io import read_video
@@ -120,15 +133,16 @@ def _read_video_frames(
         kwargs["start_pts"] = start_sec
     if end_sec is not None:
         kwargs["end_pts"] = end_sec
-    frames, _, _ = read_video(path, **kwargs)
-    return frames  # (T, C, H, W) uint8
+    frames, _, info = read_video(path, **kwargs)
+    fps = float(info.get("video_fps") or 25.0) if info else 25.0
+    return frames, fps  # (T, C, H, W) uint8, fps
 
 
 def _read_video_opencv(
     path: str,
     start_sec: Optional[float],
     end_sec: Optional[float],
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, float]:
     import cv2
 
     cap = cv2.VideoCapture(path)
@@ -154,7 +168,7 @@ def _read_video_opencv(
     if not out:
         raise RuntimeError(f"Empty video (or empty time range): {path}")
     arr = np.stack(out, axis=0)  # (T, H, W, C) uint8
-    return torch.from_numpy(arr).permute(0, 3, 1, 2).contiguous()
+    return torch.from_numpy(arr).permute(0, 3, 1, 2).contiguous(), float(fps)
 
 
 def _decode_clip(
@@ -167,6 +181,9 @@ def _decode_clip(
 ) -> torch.Tensor:
     """Read a video file and return a (T, C, H, W) float tensor in ImageNet norm.
 
+    Legacy fixed-count TSN sampler. Use :func:`_decode_clip_fps` instead when
+    you want fixed-FPS / variable-T behaviour.
+
     Args:
         path:      Path to the video file.
         n_frames:  Number of frames to sample.
@@ -176,7 +193,7 @@ def _decode_clip(
         end_sec:   Optional clip end time in seconds.
     """
     try:
-        frames = _read_video_frames(path, start_sec, end_sec)
+        frames, _native_fps = _read_video_frames(path, start_sec, end_sec)
     except Exception as exc:
         raise RuntimeError(f"Failed to decode {path}: {exc}") from exc
 
@@ -205,6 +222,81 @@ def _decode_clip(
     return frames
 
 
+def _fps_sampled_indices(
+    num_video_frames: int, native_fps: float, target_fps: float,
+    train: bool, min_frames: int = 4,
+) -> np.ndarray:
+    """Pick indices that decimate a ``native_fps`` video to ``target_fps``.
+
+    Mirrors TSN's per-bin random-jitter at train time and bin-centre at eval:
+
+    1. Output length ``T_target = round(duration_s * target_fps)`` so each
+       clip's CTM tick budget is proportional to its real-time duration.
+    2. Each output bin spans ``num_video_frames / T_target`` source frames;
+       within that bin, train picks a uniformly-random offset, eval picks
+       the centre.
+    3. Floors at ``min_frames`` so very short rep windows still produce a
+       usable clip (frames are repeated by the ``np.linspace`` fallback).
+    """
+    T_target = max(min_frames, int(round((num_video_frames / max(native_fps, 1e-6)) * target_fps)))
+    if num_video_frames <= 0:
+        return np.zeros(T_target, dtype=np.int64)
+    if num_video_frames <= T_target:
+        # Source shorter than target — replicate to fill.
+        idxs = np.linspace(0, num_video_frames - 1, T_target)
+        return np.round(idxs).astype(np.int64)
+    bin_size = num_video_frames / T_target
+    if train:
+        offsets = np.random.uniform(0, bin_size, size=T_target)
+    else:
+        offsets = np.full(T_target, bin_size / 2.0)
+    bin_starts = np.arange(T_target) * bin_size
+    return np.clip(np.floor(bin_starts + offsets), 0, num_video_frames - 1).astype(np.int64)
+
+
+def _decode_clip_fps(
+    path: str,
+    target_fps: float,
+    image_size: int,
+    train: bool,
+    start_sec: Optional[float] = None,
+    end_sec: Optional[float] = None,
+    min_frames: int = 4,
+) -> torch.Tensor:
+    """FPS-based, variable-length counterpart of :func:`_decode_clip`.
+
+    Decodes the video (optionally trimmed to ``[start_sec, end_sec]``),
+    decimates to ``target_fps`` real-time-aware frames per second, then runs
+    the same train-time augmentation / eval-time deterministic resize as
+    :func:`_decode_clip`. Output is (T, C, H, W) where T varies per clip.
+    """
+    try:
+        frames, native_fps = _read_video_frames(path, start_sec, end_sec)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to decode {path}: {exc}") from exc
+
+    num = frames.shape[0]
+    if num == 0:
+        raise RuntimeError(f"Empty video (or empty time range): {path}")
+
+    idxs = _fps_sampled_indices(num, native_fps, target_fps, train=train, min_frames=min_frames)
+    frames = frames[idxs].float() / 255.0                              # (T, C, H, W)
+
+    if train:
+        from tasks.video.dataset import _train_augment_video
+        frames = _train_augment_video(frames, image_size)
+    else:
+        frames = F.interpolate(
+            frames, size=(image_size, image_size),
+            mode="bilinear", align_corners=False,
+        )
+
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    frames = (frames - mean) / std
+    return frames
+
+
 # --------------------------------------------------------------------------- #
 # Synthetic oscillating dots
 # --------------------------------------------------------------------------- #
@@ -212,29 +304,46 @@ def _decode_clip(
 class SyntheticOscillatingDots(Dataset):
     """Synthetic clip: a bright dot bouncing N times vertically.
 
-    The dot follows a pure cosine trajectory so the video's motion spectrum
-    has a clean peak at frequency N / n_frames. This directly verifies the
-    phase-locked-loop hypothesis: if the CTM NLMs learn oscillators, the
-    dominant per-neuron FFT bin (expressed in cycle counts) should match N.
+    Now FPS-aware with variable duration: each clip's length in frames is
+    ``round(duration_s * target_fps)``, where ``duration_s`` is drawn
+    uniformly per sample from ``[duration_s_min, duration_s_max]``. The
+    cosine trajectory completes ``count`` full cycles over ``duration_s``
+    seconds, so the *real-time* oscillation rate is ``count / duration_s``
+    Hz — independent of the spatial resolution and of the fixed-frame
+    convention the v1 dataset used. This stresses the variable-length
+    plumbing: clips of different lengths share a batch via padding +
+    frame mask.
 
     Args:
-        n_samples:  Number of distinct clips.
-        n_frames:   Frames per clip (also == total CTM ticks when iterations_per_frame=1).
-        image_size: Spatial resolution H = W.
-        max_count:  Maximum oscillation count; labels are uniform in [1, max_count].
-        split:      'train' or 'test' — selects a different random-seed offset.
+        n_samples:        Number of distinct clips.
+        target_fps:       Frames sampled per second (also CTM internal-tick
+                          rate when iterations_per_frame=1).
+        duration_s_min:   Lower bound on clip duration (seconds).
+        duration_s_max:   Upper bound on clip duration (seconds). Set equal
+                          to ``duration_s_min`` for fixed-length clips.
+        image_size:       Spatial resolution H = W.
+        max_count:        Maximum oscillation count; labels uniform in [1, max_count].
+        split:            'train' / 'test' — different random-seed offset.
     """
 
     def __init__(
         self,
         n_samples: int = 2048,
-        n_frames: int = 64,
+        target_fps: float = 8.0,
+        duration_s_min: float = 4.0,
+        duration_s_max: float = 12.0,
         image_size: int = 64,
         max_count: int = 16,
         split: str = "train",
     ):
+        if duration_s_max < duration_s_min:
+            raise ValueError(
+                f"duration_s_max ({duration_s_max}) < duration_s_min ({duration_s_min})"
+            )
         self.n_samples = n_samples
-        self.n_frames = n_frames
+        self.target_fps = float(target_fps)
+        self.duration_s_min = float(duration_s_min)
+        self.duration_s_max = float(duration_s_max)
         self.image_size = image_size
         self.max_count = max_count
         self.offset = 0 if split == "train" else 10_000_000
@@ -246,21 +355,28 @@ class SyntheticOscillatingDots(Dataset):
         rng = np.random.default_rng(index + self.offset)
         count = int(rng.integers(1, self.max_count + 1))
 
+        if self.duration_s_max == self.duration_s_min:
+            duration_s = self.duration_s_min
+        else:
+            duration_s = float(rng.uniform(self.duration_s_min, self.duration_s_max))
+        n_frames = max(2, int(round(duration_s * self.target_fps)))
+
         H = W = self.image_size
         radius = max(2, H // 12)
         cx = W // 2
 
-        # Pure cosine trajectory: count full oscillations over n_frames.
-        phase = np.linspace(0, 2 * np.pi * count, self.n_frames, endpoint=False)
-        # Map [-1, 1] → [radius, H - radius]
+        # Pure cosine trajectory: ``count`` full oscillations over duration_s
+        # seconds. Sampling at ``target_fps`` gives ``n_frames`` samples of
+        # ``cos(2π * count * t / duration_s)`` at t = i / target_fps.
+        phase = 2 * np.pi * count * np.arange(n_frames) / (duration_s * self.target_fps)
         cy_arr = ((H - 2 * radius) / 2 * (1 - np.cos(phase)) + radius).astype(np.int32)
 
         color = rng.uniform(0.6, 1.0, size=3).astype(np.float32)
         bg = rng.uniform(0.0, 0.15, size=3).astype(np.float32)
 
         ys, xs = np.mgrid[0:H, 0:W]
-        clip = np.zeros((self.n_frames, 3, H, W), dtype=np.float32)
-        for t_idx in range(self.n_frames):
+        clip = np.zeros((n_frames, 3, H, W), dtype=np.float32)
+        for t_idx in range(n_frames):
             cy = cy_arr[t_idx]
             dx = xs - cx
             dy = ys - cy
@@ -270,9 +386,176 @@ class SyntheticOscillatingDots(Dataset):
                 frame[mask] = color[c]
                 clip[t_idx, c] = frame
 
-        # Normalise to [-1, 1] to match the synthetic convention in tasks/video.
+        # Normalise to [-1, 1]
         clip = (clip - 0.5) / 0.5
         return torch.from_numpy(clip), count
+
+
+class SyntheticOscillatingDotsV2(Dataset):
+    """Synthetic clip v2: variable active duration, non-stationary frequency, jitter.
+
+    Now FPS-aware (matches ``SyntheticOscillatingDots``): each clip's length
+    is ``round(duration_s * target_fps)`` with ``duration_s`` drawn uniformly
+    in ``[duration_s_min, duration_s_max]``. T varies per sample; clips of
+    different lengths share a batch via padding + frame mask.
+
+    Differences from ``SyntheticOscillatingDots``:
+
+      1. **Variable active span.** The dot oscillates only over a contiguous
+         sub-window of length ``m`` (frames) inside the clip. ``m`` varies
+         per sample, so the bijection ``count = T * f`` (which made v1
+         solvable from a single-period estimate) is broken — the model has
+         to localise the moving region and integrate over it.
+      2. **Non-stationary frequency.** The active span is split into
+         ``k ∈ [1, max_segments]`` contiguous segments, each with its own
+         per-segment integer count ``c_i``. Phase is continuous across
+         segment boundaries; the label is ``sum(c_i)``.
+      3. **Trajectory noise.** Small Gaussian jitter (``noise_std`` × vertical
+         range) is added to the dot's y position each frame.
+
+    Outside the active span, the dot is held stationary at the boundary
+    position (no fade-in/out cue from appearance/disappearance).
+
+    Args:
+        n_samples:        Number of distinct clips.
+        target_fps:       Frames per second (also CTM tick rate at IPF=1).
+        duration_s_min:   Lower bound on per-clip duration (seconds).
+        duration_s_max:   Upper bound on per-clip duration (seconds).
+        image_size:       Spatial resolution H = W.
+        max_count:        Upper bound on the *total* (summed) count label.
+        min_active_s:     Floor on the active-span duration in seconds.
+        max_segments:     Max number of frequency-changing segments.
+        noise_std:        Gaussian y-jitter std as fraction of the vertical
+                          motion range.
+        split:            'train' / 'test' — different random-seed offset.
+    """
+
+    def __init__(
+        self,
+        n_samples: int = 2048,
+        target_fps: float = 8.0,
+        duration_s_min: float = 4.0,
+        duration_s_max: float = 12.0,
+        image_size: int = 64,
+        max_count: int = 16,
+        min_active_s: float = 3.0,
+        max_segments: int = 3,
+        noise_std: float = 0.02,
+        split: str = "train",
+    ):
+        if duration_s_max < duration_s_min:
+            raise ValueError(
+                f"duration_s_max ({duration_s_max}) < duration_s_min ({duration_s_min})"
+            )
+        self.n_samples = n_samples
+        self.target_fps = float(target_fps)
+        self.duration_s_min = float(duration_s_min)
+        self.duration_s_max = float(duration_s_max)
+        self.image_size = image_size
+        self.max_count = max_count
+        self.min_active_s = float(min_active_s)
+        self.max_segments = max(1, max_segments)
+        self.noise_std = noise_std
+        self.offset = 0 if split == "train" else 10_000_000
+
+    def __len__(self) -> int:
+        return self.n_samples
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
+        rng = np.random.default_rng(index + self.offset)
+        H = W = self.image_size
+        radius = max(2, H // 12)
+        cx = W // 2
+
+        # --- Per-clip duration → T_actual ---
+        if self.duration_s_max == self.duration_s_min:
+            duration_s = self.duration_s_min
+        else:
+            duration_s = float(rng.uniform(self.duration_s_min, self.duration_s_max))
+        n_frames = max(2, int(round(duration_s * self.target_fps)))
+
+        # --- Per-segment counts (their sum is the label) ---
+        n_seg = int(rng.integers(1, self.max_segments + 1))
+        max_per_seg = max(1, self.max_count // n_seg)
+        counts = rng.integers(1, max_per_seg + 1, size=n_seg).astype(np.int64)
+        total_count = int(counts.sum())
+
+        # Per-segment minimum length: ~3 samples per cycle so the period is
+        # resolvable, plus an absolute floor.
+        min_seg_lens = np.maximum(8, 3 * counts).astype(np.int64)
+        total_min = int(min_seg_lens.sum())
+        if total_min > n_frames:
+            # Duration too short for the sampled segment counts → collapse to
+            # one segment with the largest feasible count given this clip's T.
+            n_seg = 1
+            counts = np.array([min(self.max_count, max(1, n_frames // 3))], dtype=np.int64)
+            counts = np.maximum(counts, 1)
+            total_count = int(counts.sum())
+            min_seg_lens = np.maximum(8, 3 * counts).astype(np.int64)
+            total_min = int(min_seg_lens.sum())
+
+        # --- Active span length and position ---
+        min_active_frames = max(int(round(self.min_active_s * self.target_fps)), total_min)
+        min_active_frames = min(min_active_frames, n_frames)
+        active = int(rng.integers(min_active_frames, n_frames + 1))
+        start = int(rng.integers(0, n_frames - active + 1))
+
+        # --- Distribute slack across segments (random partition of `active`) ---
+        slack = active - total_min
+        if slack > 0 and n_seg > 1:
+            cuts = np.sort(rng.integers(0, slack + 1, size=n_seg - 1))
+            prev = 0
+            deltas = []
+            for c_ in cuts:
+                deltas.append(int(c_) - prev)
+                prev = int(c_)
+            deltas.append(slack - prev)
+            seg_lens = (min_seg_lens + np.asarray(deltas, dtype=np.int64))
+        else:
+            seg_lens = min_seg_lens.copy()
+            seg_lens[-1] += active - int(seg_lens.sum())
+
+        # --- Phase trajectory (continuous across segment boundaries) ---
+        phase = np.zeros(active, dtype=np.float64)
+        cur = float(rng.uniform(0.0, 2 * np.pi))
+        t = 0
+        for c_count, L in zip(counts, seg_lens):
+            L = int(L)
+            w = 2 * np.pi * float(c_count) / float(L)
+            phase[t:t + L] = cur + w * np.arange(L)
+            cur = phase[t + L - 1] + w
+            t += L
+
+        # --- Vertical position with small Gaussian jitter ---
+        span_y = (H - 2 * radius) / 2.0
+        cy_active = span_y * (1 - np.cos(phase)) + radius
+        cy_active = cy_active + rng.normal(0.0, self.noise_std * (H - 2 * radius), size=active)
+        cy_active = np.clip(cy_active, radius, H - radius)
+
+        # Hold the dot stationary at the boundary y outside the active span.
+        cy_full = np.empty(n_frames, dtype=np.float32)
+        cy_full[:start] = cy_active[0]
+        cy_full[start:start + active] = cy_active
+        cy_full[start + active:] = cy_active[-1]
+        cy_full = cy_full.astype(np.int32)
+
+        color = rng.uniform(0.6, 1.0, size=3).astype(np.float32)
+        bg = rng.uniform(0.0, 0.15, size=3).astype(np.float32)
+
+        ys, xs = np.mgrid[0:H, 0:W]
+        clip = np.zeros((n_frames, 3, H, W), dtype=np.float32)
+        for t_idx in range(n_frames):
+            cy = int(cy_full[t_idx])
+            dx = xs - cx
+            dy = ys - cy
+            mask = (dx * dx + dy * dy) <= radius * radius
+            for c in range(3):
+                frame = np.full((H, W), bg[c], dtype=np.float32)
+                frame[mask] = color[c]
+                clip[t_idx, c] = frame
+
+        clip = (clip - 0.5) / 0.5
+        return torch.from_numpy(clip), total_count
 
 
 # --------------------------------------------------------------------------- #
@@ -302,13 +585,16 @@ def _build_kinetics_youtube_id_index(kinetics_root: str) -> Dict[str, str]:
     if not os.path.isdir(kinetics_root):
         raise FileNotFoundError(f"kinetics_root does not exist: {kinetics_root}")
 
-    # Prefer the standard kinetics_400_train / kinetics_400_val subtrees so we
-    # don't accidentally walk unrelated siblings of the data root.
-    candidate_roots = [
-        os.path.join(kinetics_root, "kinetics_700_train"),
-        os.path.join(kinetics_root, "kinetics_700_val"),
-    ]
-    candidate_roots = [r for r in candidate_roots if os.path.isdir(r)]
+    # Prefer the standard kinetics_{400,600,700}_{train,val,test} subtrees so
+    # we don't accidentally walk unrelated siblings of the data root. Countix
+    # is built from Kinetics-400, so we walk 400 first, then 600/700 as
+    # fallbacks (a YouTube ID may have been re-included in newer releases).
+    candidate_roots: List[str] = []
+    for version in ("400", "600", "700"):
+        for sub in ("train", "val", "test"):
+            p = os.path.join(kinetics_root, f"kinetics_{version}_{sub}")
+            if os.path.isdir(p):
+                candidate_roots.append(p)
     if not candidate_roots:
         candidate_roots = [kinetics_root]
 
@@ -321,7 +607,7 @@ def _build_kinetics_youtube_id_index(kinetics_root: str) -> Dict[str, str]:
                     continue
                 m = _KINETICS_TIMESPAN_RE.search(stem)
                 yt_id = stem[: m.start()] if m else stem
-                # Don't overwrite a hit from train with one from val.
+                # First match wins (priority order set by candidate_roots).
                 index.setdefault(yt_id, os.path.join(dirpath, fname))
     return index
 
@@ -371,12 +657,14 @@ class CountixDataset(Dataset):
         time_offset_col: Optional[str] = "kinetics_start",
         video_ext: str = ".mp4",
         kinetics_root: Optional[str] = None,
+        target_fps: Optional[float] = None,
     ):
         self.n_frames = n_frames
         self.image_size = image_size
         self.train = split == "train"
         self.start_col = start_col
         self.end_col = end_col
+        self.target_fps = target_fps
 
         csv_name = f"countix_{split}.csv"
         csv_path = os.path.join(data_root, csv_name)
@@ -416,10 +704,16 @@ class CountixDataset(Dataset):
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         rec = self.records[index]
-        clip = _decode_clip(
-            rec["path"], self.n_frames, self.image_size, self.train,
-            start_sec=rec["start"], end_sec=rec["end"],
-        )
+        if self.target_fps is not None:
+            clip = _decode_clip_fps(
+                rec["path"], self.target_fps, self.image_size, self.train,
+                start_sec=rec["start"], end_sec=rec["end"],
+            )
+        else:
+            clip = _decode_clip(
+                rec["path"], self.n_frames, self.image_size, self.train,
+                start_sec=rec["start"], end_sec=rec["end"],
+            )
         return clip, rec["count"]
 
 
@@ -454,10 +748,12 @@ class RepCountADataset(Dataset):
         count_col: str = "count",
         video_subdir: str = "videos",
         video_exts: Tuple[str, ...] = (".mp4", ".avi", ".mov"),
+        target_fps: Optional[float] = None,
     ):
         self.n_frames = n_frames
         self.image_size = image_size
         self.train = split == "train"
+        self.target_fps = target_fps
 
         csv_path = os.path.join(data_root, "annotation", f"{split}.csv")
         videos_dir = os.path.join(data_root, video_subdir)
@@ -492,7 +788,12 @@ class RepCountADataset(Dataset):
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         rec = self.records[index]
-        clip = _decode_clip(rec["path"], self.n_frames, self.image_size, self.train)
+        if self.target_fps is not None:
+            clip = _decode_clip_fps(
+                rec["path"], self.target_fps, self.image_size, self.train,
+            )
+        else:
+            clip = _decode_clip(rec["path"], self.n_frames, self.image_size, self.train)
         return clip, rec["count"]
 
 
@@ -523,10 +824,12 @@ class UCFRepDataset(Dataset):
         image_size: int = 112,
         annotation_file: str = "ucfrep_annotations.json",
         videos_subdir: str = "UCF-101",
+        target_fps: Optional[float] = None,
     ):
         self.n_frames = n_frames
         self.image_size = image_size
         self.train = split == "train"
+        self.target_fps = target_fps
 
         ann_path = os.path.join(data_root, annotation_file)
         videos_root = os.path.join(data_root, videos_subdir)
@@ -549,13 +852,45 @@ class UCFRepDataset(Dataset):
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         rec = self.records[index]
-        clip = _decode_clip(rec["path"], self.n_frames, self.image_size, self.train)
+        if self.target_fps is not None:
+            clip = _decode_clip_fps(
+                rec["path"], self.target_fps, self.image_size, self.train,
+            )
+        else:
+            clip = _decode_clip(rec["path"], self.n_frames, self.image_size, self.train)
         return clip, rec["count"]
 
 
 # --------------------------------------------------------------------------- #
 # Factory
 # --------------------------------------------------------------------------- #
+
+def video_count_collate(batch):
+    """Collate variable-length (frames, count) samples for the rep-count task.
+
+    Args:
+        batch: list of (frames: (T_i, C, H, W), count: int).
+
+    Returns:
+        frames: (B, T_max, C, H, W) zero-padded along time.
+        mask:   (B, T_max) bool — True where the frame is real.
+        counts: (B,) long.
+    """
+    Ts = [item[0].shape[0] for item in batch]
+    T_max = max(Ts)
+    B = len(batch)
+    f0 = batch[0][0]
+    C, H, W = f0.shape[1], f0.shape[2], f0.shape[3]
+    frames = torch.zeros(B, T_max, C, H, W, dtype=f0.dtype)
+    mask = torch.zeros(B, T_max, dtype=torch.bool)
+    counts = torch.empty(B, dtype=torch.long)
+    for i, (clip, count) in enumerate(batch):
+        Ti = clip.shape[0]
+        frames[i, :Ti] = clip
+        mask[i, :Ti] = True
+        counts[i] = int(count)
+    return frames, mask, counts
+
 
 def build_datasets(
     dataset: str,
@@ -565,54 +900,100 @@ def build_datasets(
     max_count: int = 16,
     fold: int = 1,
     kinetics_root: Optional[str] = None,
+    target_fps: Optional[float] = None,
+    duration_s_min: Optional[float] = None,
+    duration_s_max: Optional[float] = None,
 ) -> Tuple[Dataset, Dataset]:
     """Build (train_dataset, test_dataset) for the requested backend.
 
     Args:
-        dataset:       One of 'synthetic', 'countix', 'repcount', 'ucfrep'.
-        data_root:     Root directory for real datasets (ignored for 'synthetic').
-        n_frames:      Frames sampled per clip.
-        image_size:    Spatial resolution H = W.
-        max_count:     Upper bound on oscillation count for 'synthetic'.
-        fold:          Unused (kept for API consistency with tasks/video).
-        kinetics_root: For 'countix' only — root of an official Kinetics-400
-                       mirror used to look up videos by youtube_id when the
-                       Countix CSVs are not co-located with the videos.
+        dataset:        One of 'synthetic', 'synthetic-v2', 'countix', 'repcount', 'ucfrep'.
+        data_root:      Root directory for real datasets (ignored for synthetic backends).
+        n_frames:       Frames sampled per clip — used by real datasets in
+                        legacy fixed-count mode (when ``target_fps is None``).
+                        Ignored for the synthetic backend, which always
+                        derives T from ``target_fps * duration_s``.
+        image_size:     Spatial resolution H = W.
+        max_count:      Upper bound on oscillation count for synthetic backends.
+        fold:           Unused (kept for API consistency with tasks/video).
+        kinetics_root:  For 'countix' only — root of an official Kinetics-400 mirror.
+        target_fps:     Frames sampled per second. Required for synthetic;
+                        for real datasets, when set, switches them to the
+                        FPS-based variable-length sampler (see
+                        ``_decode_clip_fps``); when ``None`` they keep
+                        legacy fixed-``n_frames`` TSN sampling.
+        duration_s_min: For synthetic backends — lower bound on per-clip duration.
+        duration_s_max: For synthetic backends — upper bound on per-clip duration.
 
     Returns:
         (train_dataset, test_dataset)
     """
     if dataset == "synthetic":
+        if target_fps is None or duration_s_min is None or duration_s_max is None:
+            raise ValueError(
+                "synthetic dataset requires target_fps + duration_s_min + duration_s_max"
+            )
         train = SyntheticOscillatingDots(
-            n_samples=2048, n_frames=n_frames, image_size=image_size,
-            max_count=max_count, split="train",
+            n_samples=2048, target_fps=target_fps,
+            duration_s_min=duration_s_min, duration_s_max=duration_s_max,
+            image_size=image_size, max_count=max_count, split="train",
         )
         test = SyntheticOscillatingDots(
-            n_samples=256, n_frames=n_frames, image_size=image_size,
-            max_count=max_count, split="test",
+            n_samples=256, target_fps=target_fps,
+            duration_s_min=duration_s_min, duration_s_max=duration_s_max,
+            image_size=image_size, max_count=max_count, split="test",
+        )
+        return train, test
+
+    if dataset == "synthetic-v2":
+        if target_fps is None or duration_s_min is None or duration_s_max is None:
+            raise ValueError(
+                "synthetic-v2 dataset requires target_fps + duration_s_min + duration_s_max"
+            )
+        train = SyntheticOscillatingDotsV2(
+            n_samples=2048, target_fps=target_fps,
+            duration_s_min=duration_s_min, duration_s_max=duration_s_max,
+            image_size=image_size, max_count=max_count, split="train",
+        )
+        test = SyntheticOscillatingDotsV2(
+            n_samples=256, target_fps=target_fps,
+            duration_s_min=duration_s_min, duration_s_max=duration_s_max,
+            image_size=image_size, max_count=max_count, split="test",
         )
         return train, test
 
     if dataset == "countix":
         train = CountixDataset(
             data_root, split="train", n_frames=n_frames, image_size=image_size,
-            kinetics_root=kinetics_root,
+            kinetics_root=kinetics_root, target_fps=target_fps,
         )
         test = CountixDataset(
             data_root, split="val", n_frames=n_frames, image_size=image_size,
-            kinetics_root=kinetics_root,
+            kinetics_root=kinetics_root, target_fps=target_fps,
         )
         return train, test
 
     if dataset == "repcount":
-        train = RepCountADataset(data_root, split="train", n_frames=n_frames, image_size=image_size)
-        test = RepCountADataset(data_root, split="valid", n_frames=n_frames, image_size=image_size)
+        train = RepCountADataset(
+            data_root, split="train", n_frames=n_frames, image_size=image_size,
+            target_fps=target_fps,
+        )
+        test = RepCountADataset(
+            data_root, split="valid", n_frames=n_frames, image_size=image_size,
+            target_fps=target_fps,
+        )
         return train, test
 
     if dataset == "ucfrep":
-        train = UCFRepDataset(data_root, split="train", n_frames=n_frames, image_size=image_size)
-        test = UCFRepDataset(data_root, split="test", n_frames=n_frames, image_size=image_size)
+        train = UCFRepDataset(
+            data_root, split="train", n_frames=n_frames, image_size=image_size,
+            target_fps=target_fps,
+        )
+        test = UCFRepDataset(
+            data_root, split="test", n_frames=n_frames, image_size=image_size,
+            target_fps=target_fps,
+        )
         return train, test
 
     raise ValueError(f"Unknown dataset: {dataset!r}. "
-                     f"Choose from 'synthetic', 'countix', 'repcount', 'ucfrep'.")
+                     f"Choose from 'synthetic', 'synthetic-v2', 'countix', 'repcount', 'ucfrep'.")
