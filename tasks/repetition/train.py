@@ -97,7 +97,7 @@ def parse_args():
                         choices=["cosine", "multistep"])
     parser.add_argument("--milestones", type=int, nargs="+", default=[20000, 35000])
     parser.add_argument("--gamma", type=float, default=0.1)
-    parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--gradient_clipping", type=float, default=-1)
 
     # Housekeeping
@@ -126,6 +126,60 @@ def pick_device(args):
     return "cpu"
 
 
+def _log_split_stats(ds, name: str, n_count_buckets: int) -> None:
+    """Print per-split count histogram and clamp summary to the stdout log."""
+    from collections import Counter
+
+    n = len(ds)
+    print(f"  {name}: len={n}")
+    if n == 0:
+        return
+
+    # Real datasets expose .records with integer 'count' fields.
+    if hasattr(ds, "records") and ds.records and "count" in ds.records[0]:
+        counts = [int(r["count"]) for r in ds.records]
+    else:
+        # Synthetic: labels are deterministic per index, so we can sample
+        # them cheaply (the CPU-only synth __getitem__ is fast).
+        sample_n = min(n, 2048)
+        counts = [int(ds[i][1]) for i in range(sample_n)]
+        if sample_n < n:
+            print(f"    (count histogram from first {sample_n}/{n} samples)")
+
+    arr = np.asarray(counts)
+    n_clamped = int((arr >= n_count_buckets).sum())
+    print(f"    count: min={arr.min()} max={arr.max()} "
+          f"mean={arr.mean():.2f} median={float(np.median(arr)):.1f} "
+          f"std={arr.std():.2f}")
+    print(f"    clamped (>= n_count_buckets={n_count_buckets}): "
+          f"{n_clamped}/{len(arr)} ({100.0 * n_clamped / max(1, len(arr)):.1f}%)")
+
+    # Coarse decade-style histogram so the txt log stays readable.
+    edges = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
+    hist = Counter()
+    for v in counts:
+        placed = False
+        for lo, hi in zip(edges, edges[1:]):
+            if lo <= v < hi:
+                hist[f"[{lo},{hi})"] += 1
+                placed = True
+                break
+        if not placed:
+            hist["other"] += 1
+    print("    histogram (count buckets):")
+    for lo, hi in zip(edges, edges[1:]):
+        k = f"[{lo},{hi})"
+        if hist[k]:
+            print(f"      {k:>10s}: {hist[k]}")
+    if hist["other"]:
+        print(f"      {'other':>10s}: {hist['other']}")
+
+    # Top 10 modes (handy for spotting "most clips have count=2" baselines).
+    top = Counter(counts).most_common(10)
+    pretty = ", ".join(f"{c}×{k}" for k, c in top)
+    print(f"    top modes: {pretty}")
+
+
 def main():
     args = parse_args()
     args.out_dims = args.n_count_buckets
@@ -139,6 +193,9 @@ def main():
     )
     print(f"Dataset={args.dataset}  train={len(train_data)}  test={len(test_data)}  "
           f"buckets={args.n_count_buckets}  max_count={args.max_count}")
+    print("Dataset stats:")
+    _log_split_stats(train_data, "train", args.n_count_buckets)
+    _log_split_stats(test_data,  "test ", args.n_count_buckets)
 
     train_loader = torch.utils.data.DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True,

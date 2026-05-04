@@ -18,15 +18,15 @@ python -m tasks.repetition.train \
     --data_root "${DATA_ROOT}" \
     --n_frames 64 \
     --image_size 112 \
-    --n_count_buckets 64 \
-    --d_model 1024 \
+    --n_count_buckets 32 \
+    --d_model 512 \
     --d_input 256 \
     --heads 8 \
     --iterations_per_frame 1 \
-    --synapse_depth 4 \
+    --synapse_depth 2 \
     --n_synch_out 128 \
     --n_synch_action 128 \
-    --memory_length 32 \
+    --memory_length 16 \
     --memory_hidden_dims 32 \
     --backbone_type resnet18-2 \
     --positional_embedding_type none \

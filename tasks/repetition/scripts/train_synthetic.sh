@@ -25,7 +25,7 @@ python -m tasks.repetition.train \
     --batch_size 16 \
     --batch_size_test 16 \
     --lr 3e-4 \
-    --training_iterations 5001 \
+    --training_iterations 2001 \
     --warmup_steps 200 \
     --track_every 500 \
     --save_every 500 \

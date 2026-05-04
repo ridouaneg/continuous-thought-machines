@@ -187,15 +187,21 @@ def _decode_clip(
     idxs = _tsn_segment_indices(num, n_frames, train=train)
     frames = frames[idxs].float() / 255.0                              # (T, C, H, W)
 
-    frames = F.interpolate(
-        frames, size=(image_size, image_size), mode="bilinear", align_corners=False
-    )
+    if train:
+        # Reuse the temporally-coherent augmentation pipeline from tasks/video:
+        # random resized crop + horizontal flip + colour jitter + random
+        # erasing, all parameters drawn once per clip.
+        from tasks.video.dataset import _train_augment_video
+        frames = _train_augment_video(frames, image_size)
+    else:
+        frames = F.interpolate(
+            frames, size=(image_size, image_size),
+            mode="bilinear", align_corners=False,
+        )
+
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
     frames = (frames - mean) / std
-
-    if train and random.random() < 0.5:
-        frames = torch.flip(frames, dims=[3])
     return frames
 
 
