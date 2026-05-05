@@ -26,6 +26,7 @@ sns.set_style("darkgrid")
 if torch.cuda.is_available():
     torch.set_float32_matmul_precision("high")
 
+from tasks.repetition.baselines.lstm_video import LSTMBaselineVideoRepCount
 from tasks.repetition.dataset import build_datasets, video_count_collate
 from tasks.repetition.losses import count_loss, count_loss_survival
 from tasks.repetition.model import ContinuousThoughtMachineRepCount
@@ -78,6 +79,16 @@ def parse_args():
                              "discrete-hazard BCE (ordinal).")
 
     # Model
+    parser.add_argument("--model", type=str, default="ctm",
+                        choices=["ctm", "lstm"],
+                        help="Model class: 'ctm' = ContinuousThoughtMachineRepCount; "
+                             "'lstm' = LSTMBaselineVideoRepCount (matched-scale "
+                             "frame-coupled LSTM baseline). LSTM ignores the "
+                             "n_synch_*, synapse_depth, memory_*, deep_memory, "
+                             "do_normalisation, dropout_nlm, neuron_select_type "
+                             "args; uses --num_layers instead.")
+    parser.add_argument("--num_layers", type=int, default=2,
+                        help="LSTM-only: number of stacked LSTM layers.")
     parser.add_argument("--d_model", type=int, default=512)
     parser.add_argument("--d_input", type=int, default=128)
     parser.add_argument("--heads", type=int, default=4)
@@ -273,29 +284,46 @@ def main():
     device = pick_device(args)
     print(f"Using device: {device}")
 
-    model = ContinuousThoughtMachineRepCount(
-        n_frames=args.n_frames,
-        iterations_per_frame=args.iterations_per_frame,
-        d_model=args.d_model,
-        d_input=args.d_input,
-        heads=args.heads,
-        n_synch_out=args.n_synch_out,
-        n_synch_action=args.n_synch_action,
-        synapse_depth=args.synapse_depth,
-        memory_length=args.memory_length,
-        deep_nlms=args.deep_memory,
-        memory_hidden_dims=args.memory_hidden_dims,
-        do_layernorm_nlm=args.do_normalisation,
-        backbone_type=args.backbone_type,
-        positional_embedding_type=args.positional_embedding_type,
-        out_dims=args.out_dims,
-        prediction_reshaper=[-1],
-        dropout=args.dropout,
-        dropout_nlm=args.dropout_nlm,
-        neuron_select_type=args.neuron_select_type,
-        pretrained_backbone=args.pretrained_backbone,
-        freeze_backbone=args.freeze_backbone,
-    ).to(device)
+    if args.model == "ctm":
+        model = ContinuousThoughtMachineRepCount(
+            n_frames=args.n_frames,
+            iterations_per_frame=args.iterations_per_frame,
+            d_model=args.d_model,
+            d_input=args.d_input,
+            heads=args.heads,
+            n_synch_out=args.n_synch_out,
+            n_synch_action=args.n_synch_action,
+            synapse_depth=args.synapse_depth,
+            memory_length=args.memory_length,
+            deep_nlms=args.deep_memory,
+            memory_hidden_dims=args.memory_hidden_dims,
+            do_layernorm_nlm=args.do_normalisation,
+            backbone_type=args.backbone_type,
+            positional_embedding_type=args.positional_embedding_type,
+            out_dims=args.out_dims,
+            prediction_reshaper=[-1],
+            dropout=args.dropout,
+            dropout_nlm=args.dropout_nlm,
+            neuron_select_type=args.neuron_select_type,
+            pretrained_backbone=args.pretrained_backbone,
+            freeze_backbone=args.freeze_backbone,
+        ).to(device)
+    else:  # lstm
+        model = LSTMBaselineVideoRepCount(
+            n_frames=args.n_frames,
+            iterations_per_frame=args.iterations_per_frame,
+            d_model=args.d_model,
+            d_input=args.d_input,
+            heads=args.heads,
+            num_layers=args.num_layers,
+            backbone_type=args.backbone_type,
+            positional_embedding_type=args.positional_embedding_type,
+            out_dims=args.out_dims,
+            prediction_reshaper=[-1],
+            dropout=args.dropout,
+            pretrained_backbone=args.pretrained_backbone,
+            freeze_backbone=args.freeze_backbone,
+        ).to(device)
 
     dummy_clip, _ = train_data[0]
     dummy_clip_b = dummy_clip.unsqueeze(0).to(device)
