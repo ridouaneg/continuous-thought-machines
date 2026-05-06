@@ -43,15 +43,15 @@ python -m tasks.repetition.baselines.modal_count \
     --target_fps 8 \
     --save_json "${OUT_BASE}/ucfrep/modal_baseline.json"
 
-echo
-echo "=== RepCount-A ==="
-python -m tasks.repetition.baselines.modal_count \
-    --dataset repcount \
-    --data_root "${DATA_BASE}/repcount/" \
-    --image_size 112 \
-    --n_count_buckets 32 \
-    --target_fps 8 \
-    --save_json "${OUT_BASE}/repcount/modal_baseline.json"
+#echo
+#echo "=== RepCount-A ==="
+#python -m tasks.repetition.baselines.modal_count \
+#    --dataset repcount \
+#    --data_root "${DATA_BASE}/repcount/" \
+#    --image_size 112 \
+#    --n_count_buckets 32 \
+#    --target_fps 8 \
+#    --save_json "${OUT_BASE}/repcount/modal_baseline.json"
 
 echo
 echo "=== Synthetic v1 (uniform[1,8] labels — also a loose upper bound for v2) ==="

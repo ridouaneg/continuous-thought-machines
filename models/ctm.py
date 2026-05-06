@@ -6,6 +6,7 @@ from huggingface_hub import PyTorchModelHubMixin, hf_hub_download
 
 from models.modules import AudioBackbone, ParityBackbone, SynapseUNET, Squeeze, SuperLinear, LearnableFourierPositionalEncoding, MultiLearnableFourierPositionalEncoding, CustomRotationalEmbedding, CustomRotationalEmbedding1D, ShallowWide
 from models.resnet import prepare_pretrained_resnet_backbone, prepare_resnet_backbone
+from models.dinov3 import is_dinov3_backbone, get_dinov3_embed_dim, prepare_dinov3_backbone
 from models.utils import compute_normalized_entropy
 
 from models.constants import (
@@ -320,7 +321,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         elif self.backbone_type == 'audio_backbone':
             return AudioBackbone.OUT_CHANNELS
         elif 'resnet' in self.backbone_type:
-            if '18' in self.backbone_type or '34' in self.backbone_type: 
+            if '18' in self.backbone_type or '34' in self.backbone_type:
                 if self.backbone_type.split('-')[1]=='1': return 64
                 elif self.backbone_type.split('-')[1]=='2': return 128
                 elif self.backbone_type.split('-')[1]=='3': return 256
@@ -334,6 +335,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 elif self.backbone_type.split('-')[1]=='4': return 2048
                 else:
                     raise NotImplementedError
+        elif is_dinov3_backbone(self.backbone_type):
+            return get_dinov3_embed_dim(self.backbone_type)
         elif self.backbone_type == 'none':
             return None
         else:
@@ -357,6 +360,10 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 )
             else:
                 self.backbone = prepare_resnet_backbone(self.backbone_type)
+        elif is_dinov3_backbone(self.backbone_type):
+            self.backbone = prepare_dinov3_backbone(
+                self.backbone_type, freeze=self.freeze_backbone,
+            )
         elif self.backbone_type == 'none':
             self.backbone = nn.Identity()
         else:

@@ -22,6 +22,7 @@
 module load arch/h100
 module load ffmpeg/6.1.1
 module load pytorch-gpu/py3/2.6.0
+module unload cudnn  # venv ships cuDNN 9.19; JZ system cuDNN 9.2 on LD_LIBRARY_PATH crashes nn.LSTM
 source /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines/.venv/bin/activate
 cd /lustre/fsn1/projects/rech/kcn/ucm72yx/code/continuous-thought-machines
 
